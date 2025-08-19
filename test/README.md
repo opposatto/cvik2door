@@ -102,6 +102,6 @@ Troubleshooting
 
 Next steps before push
 
-- Remove duplicate test files at repository root (duplicates were copied to `test/`).
+
 - Stop any local bot process, verify webhook status via Telegram `getWebhookInfo`, then confirm webhook works by pinging the bot (send `/start` from admin).
 

@@ -2,10 +2,6 @@
   "orders": [
     {
       "order_id": 999999,
-      "customer_name": "bak-test"
-    },
-    {
-      "order_id": 999999,
       "order_status": "assigned",
       "order_status_emoji": "🛍️",
       "customer_name": "persistence-tester",
@@ -23,6 +19,26 @@
       "feedback": null,
       "date_time_stamp": "2025-08-19T12:49:12.276Z",
       "driver_id": 2023372448
+    },
+    {
+      "order_id": 1000000,
+      "order_status": "pickedup",
+      "order_status_emoji": "⚡",
+      "customer_name": "Kali",
+      "customer_id": 5186573916,
+      "map_link": "",
+      "total_amount": 0,
+      "paid_status": "",
+      "payment_method": "",
+      "given_cash": null,
+      "change_cash": null,
+      "driver_name": "Kali",
+      "driver_assigned": true,
+      "driver_status": "busy",
+      "items": "",
+      "feedback": null,
+      "date_time_stamp": "2025-08-19T19:22:39.864Z",
+      "driver_id": 2023372448
     }
   ],
   "drivers": [
@@ -33,16 +49,23 @@
       "status": "online"
     }
   ],
-  "customers": [
+  "customers": [],
+  "sessions": [],
+  "qrCodes": [
     {
-      "id": 5186573916,
-      "name": "Kali",
-      "username": "grandkali"
+      "id": "1755633393545",
+      "code": "QR-1755633393545",
+      "enabled": true,
+      "createdAt": 1755633393545,
+      "media": {
+        "type": "photo",
+        "file_id": "AgACAgUAAxkBAAIBYmik10kZm8AsZg2ef53iBj6vNp6PAAILwzEbjp4oVffeOZ7D2ttNAQADAgADeQADNgQ"
+      }
     }
   ],
-  "sessions": [],
-  "qrCodes": [],
-  "orderCounter": 1000000,
+  "shiftProfiles": [],
+  "orderCounter": 1000001,
+  "profileCounter": 1,
   "SETTINGS": {
     "archiveDays": 7,
     "groupLogRotateBytes": 5242880,

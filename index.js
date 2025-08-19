@@ -4,6 +4,12 @@ dotenv.config();
 const fs = require('fs');
 const path = require('path');
 
+// simple HTML-escape helper for admin-facing messages
+function escapeHtml(s) {
+  if (!s && s !== 0) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 // Normalize ADMIN_ID: accept plain numbers or values like "$env:12345" by extracting digits
 let ADMIN_ID = null;
@@ -22,6 +28,9 @@ console.log('Resolved ADMIN_ID=', ADMIN_ID);
 // Create bot without starting polling immediately. We'll delete any webhook and
 // then start polling to avoid '409 Conflict: terminated by other getUpdates request'
 const bot = new TelegramBot(TOKEN, { polling: false });
+
+// centralized keyboards (refactor)
+const K = require('./keyboards');
 
 // Small instance identifier to help diagnose duplicate-update problems across processes
 const INSTANCE_ID = `${process.pid}-${Math.random().toString(16).slice(2,8)}`;
@@ -101,6 +110,8 @@ const drivers = [];
 const customers = [];
 const sessions = [];
 const qrCodes = [];
+// shift profiles: simple admin-defined profiles and completed shifts
+const shiftProfiles = [];
 // runtime-only maps
 // sessionTimers: sessionId -> { timeout, interval }
 const sessionTimers = new Map(); // sessionId -> { timeout, interval }
@@ -120,6 +131,7 @@ let SETTINGS = {
 };
 
 let orderCounter = 1;
+let profileCounter = 1;
 // load persisted data (after in-memory arrays exist)
 loadData();
 
@@ -223,7 +235,9 @@ function loadData() {
       if (obj.drivers) { drivers.length = 0; Array.prototype.push.apply(drivers, obj.drivers); }
       if (obj.sessions) { sessions.length = 0; Array.prototype.push.apply(sessions, obj.sessions); }
       if (obj.qrCodes) { qrCodes.length = 0; Array.prototype.push.apply(qrCodes, obj.qrCodes); }
+  if (obj.shiftProfiles) { shiftProfiles.length = 0; Array.prototype.push.apply(shiftProfiles, obj.shiftProfiles); }
       if (typeof obj.orderCounter === 'number') orderCounter = obj.orderCounter;
+  if (typeof obj.profileCounter === 'number') profileCounter = obj.profileCounter;
       if (obj.SETTINGS) SETTINGS = Object.assign(SETTINGS, obj.SETTINGS);
       // cleanup sessions: remove ended/expired sessions or sessions referencing missing drivers/orders/customers
       try {
@@ -277,7 +291,7 @@ function loadData() {
 
 function saveData() {
   // queue writes so only one write/rename runs at a time
-  const obj = { orders, drivers, customers, sessions, qrCodes, orderCounter, SETTINGS };
+  const obj = { orders, drivers, customers, sessions, qrCodes, shiftProfiles, orderCounter, profileCounter, SETTINGS };
   const data = JSON.stringify(obj, null, 2);
   const tmp = DATA_FILE + '.tmp';
   const bak = DATA_FILE + '.bak';
@@ -427,34 +441,8 @@ function createOrder(data = {}) {
     date_time_stamp: new Date().toISOString()
   }, data);
   orders.push(order);
-  // If exactly one driver is online, auto-assign to them for convenience.
-  // Use a lightweight cross-process lock so two bot instances won't double-assign.
-  try {
-    const lock = acquireAssignLock(order.order_id);
-    if (lock) {
-      try {
-        // refresh drivers list from disk without mutating global counters/state
-        const diskDrivers = readDriversFromDisk();
-        const onlineDrivers = diskDrivers.filter(d => d.status === 'online');
-        if (onlineDrivers.length === 1 && !order.driver_id) {
-          const driver = onlineDrivers[0];
-          order.order_status = 'assigned';
-          order.order_status_emoji = '🛍️';
-          order.driver_assigned = true;
-          order.driver_name = driver.name || '';
-          order.driver_status = 'assigned';
-          order.driver_id = driver.id;
-          // notify driver and admin
-          try { sendOrderToDriver(order, driver).catch(() => {}); } catch (e) {}
-          try { notifyAdmin(`Order #${String(order.order_id).padStart(4,'0')} auto-assigned to ${driver.name || driver.id}`); } catch (e) {}
-        }
-      } finally {
-        releaseAssignLock(lock);
-      }
-    }
-  } catch (e) {
-    console.error('Auto-assign failed', e && e.message);
-  }
+  // Note: auto-assignment of orders to drivers was intentionally removed.
+  // Orders must be sent to drivers explicitly by admin using the 'Go' action.
   saveData();
   return order;
 }
@@ -487,44 +475,43 @@ async function notifyAdmin(text, opts = {}) {
   } catch (e) { console.error('notifyAdmin persistent send failed', e && e.message); }
 }
 
-// driver keyboards (plain labels: CONNECT / LOGOUT)
-const driverOfflineKeyboard = { reply_markup: { keyboard: [[{ text: 'CONNECT' }], [{ text: '📊STATS' }, { text: '⚙️SETTINGS' }]], resize_keyboard: true } };
-const driverOnlineKeyboard = { reply_markup: { keyboard: [[{ text: 'LOGOUT' }, { text: '📦MY ORDERS' }], [{ text: '📊STATS' }, { text: '⚙️SETTINGS' }]], resize_keyboard: true } };
+// driver keyboards (plain labels: CONNECT / LOGOUT) imported from centralized `keyboards.js`
+const driverOfflineKeyboard = K.driver.driverOfflineKeyboard;
+const driverOnlineKeyboard = K.driver.driverOnlineKeyboard;
 
 // Keyboards
 // Admin main menu as a reply keyboard (uses message text buttons to match admin message handler)
-const adminMainKeyboard = {
-  reply_markup: {
-    keyboard: [
-      [
-        { text: '📥ORDERS' },
-        { text: '⚡ACTIVE' },
-        { text: '✅COMPLETED' }
-      ],
-      [
-        { text: '➕NEW' },
-        { text: '📊STATS' },
-        { text: '⚙️SETTINGS' }
-      ]
-    ],
-    resize_keyboard: true
+// admin main keyboard (centralized)
+const adminMainKeyboard = K.admin.adminMainKeyboardFactory(SETTINGS && SETTINGS.emojisMode);
+
+// Helper: send admin main menu and display connected drivers with quick actions
+async function sendAdminMenuWithDrivers(adminChatId) {
+  // send main reply keyboard first
+  try { await bot.sendMessage(adminChatId, 'Admin menu', adminMainKeyboard); } catch (e) { /* ignore */ }
+  // list connected drivers (online/assigned/busy)
+  const connected = (drivers || []).filter(d => d && d.status && ['online','assigned','busy'].includes(String(d.status)));
+  if (!connected || connected.length === 0) {
+    try { await bot.sendMessage(adminChatId, 'Connected drivers: (none)'); } catch (e) {}
+    return;
   }
-};
+  // send a small card per connected driver with inline quick actions
+  for (const d of connected) {
+    const label = `${d.name || String(d.id)} — ${d.status || ''}`;
+    const kb = { reply_markup: { inline_keyboard: [
+      [
+        { text: '🗨️ CHAT', url: `tg://user?id=${d.id}` },
+        { text: '🗺️ TRACK', callback_data: `admin_track:${d.id}` },
+        { text: '📊 STATS', callback_data: `admin_drv_stats:${d.id}` }
+      ],
+      // quick access to orders list for this driver
+      [ { text: 'Active orders', callback_data: `admin_drv_orders:active:${d.id}` }, { text: 'Completed orders', callback_data: `admin_drv_orders:completed:${d.id}` } ]
+    ] } };
+    try { await bot.sendMessage(adminChatId, label, kb); } catch (e) { console.error('Failed send admin driver card', e && e.message); }
+  }
+}
 // Build inline keyboard used in admin order details
 function buildAdminOrderKeyboard(ord, editMode = true, backTarget = null) {
-  const inline = [];
-  if (editMode) {
-    inline.push([{ text: 'CASH', callback_data: `setpay:CASH:${ord.order_id}` }, { text: 'QR', callback_data: `setpay:QR:${ord.order_id}` }, { text: 'PAID', callback_data: `setpaid:${ord.order_id}` }, { text: `💲 ${ord.total_amount || 0}`, callback_data: `settotal:${ord.order_id}` }]);
-    // removed Send QR button as requested
-  inline.push([{ text: '📍 Set location', callback_data: `setloc:${ord.order_id}` }, { text: '➕ Attach media', callback_data: `attach:${ord.order_id}` }]);
-  inline.push([{ text: '✏️ Edit customer', callback_data: `editcust:${ord.order_id}` }, { text: '📝 Edit items', callback_data: `edititems:${ord.order_id}` }]);
-  const backCb = backTarget ? `back:${backTarget}` : 'back:menu';
-  inline.push([{ text: '⚡Go', callback_data: `go:${ord.order_id}` }, { text: '❌ Cancel', callback_data: `cancel:${ord.order_id}` }, { text: '⬅️ Go back', callback_data: backCb }]);
-  } else {
-  // when viewing (non-edit) show Delete + Go back so admin can remove cancelled orders
-  inline.push([{ text: '🗑️ Delete', callback_data: `delete:${ord.order_id}` }, { text: '↩️ Go back', callback_data: `back:menu` }]);
-  }
-  return { reply_markup: { inline_keyboard: inline } };
+  return K.inline.buildAdminOrderKeyboard(ord, editMode, backTarget);
 }
 // Admin helpers: list orders by section
 function ordersBySection(section) {
@@ -568,7 +555,7 @@ function findAvailableDriver() {
 async function sendOrderToDriver(order, driver) {
   if (!driver) return;
   const text = `Order for you:\n${formatOrder(order)}`;
-  const readyKeyboard = { reply_markup: { inline_keyboard: [[{ text: '🛍️ PICKUP', callback_data: `driver_pickup:${order.order_id}` }, { text: '🛣️ROUTE', callback_data: `driver_route:${order.order_id}` }], [{ text: '📡 START LIVE', callback_data: `driver_start_live:${order.order_id}` }, { text: '⛔ STOP LIVE', callback_data: `driver_stop_live:${order.order_id}` }]] } };
+    const readyKeyboard = K.inline.driverReadyKeyboard(order.order_id);
   try {
   await bot.sendMessage(driver.id, text, Object.assign({ parse_mode: 'HTML', disable_web_page_preview: true }, readyKeyboard));
   } catch (e) {
@@ -670,6 +657,20 @@ bot.on('message', async (msg) => {
   //ADMIN first: handle admin buttons, forwarded messages and edit-mode attachments
     if (chatId === ADMIN_ID) {
       const text = msg.text ? msg.text.trim() : '';
+      // admin profile creation state stored temporarily on admin session
+      if (!global.adminPendingProfile) global.adminPendingProfile = null;
+      // helper to send stats / profiles menu
+      async function sendStatsMenu() {
+        // build rows: NEW PROFILE + existing profiles
+        const rows = [];
+        rows.push([{ text: '➕ NEW PROFILE', callback_data: 'stats:new_profile' }]);
+        (shiftProfiles || []).forEach(p => {
+          rows.push([{ text: `${p.name || 'Profile'} (${p.id})`, callback_data: `stats:open:${p.id}` }]);
+        });
+        rows.push([{ text: '⬅️ Go back', callback_data: 'back:menu' }]);
+        const kb = { reply_markup: { inline_keyboard: rows } };
+        await bot.sendMessage(ADMIN_ID, 'Profiles', kb);
+      }
       // admin main buttons
       if (text === '📥ORDERS') { await sendOrdersListToAdmin('ORDERS'); return; } // eslint-disable-next-line no-unused-vars
       if (text === '⚡ACTIVE') { await sendOrdersListToAdmin('ACTIVE'); return; }
@@ -682,20 +683,63 @@ bot.on('message', async (msg) => {
         return;
       }
       if (text === '📊STATS') {
-        // simple admin stats summary
-        const total = orders.length;
-        const active = orders.filter(o => ['assigned','pickedup','arrived'].includes(o.order_status)).length;
-        const completed = orders.filter(o => ['completed','cancelled','archived'].includes(o.order_status)).length;
-        const pendingDrivers = drivers.filter(d => d.status === 'pending').length;
-        await bot.sendMessage(ADMIN_ID, `Stats\nTotal orders: ${total}\nActive: ${active}\nCompleted/archived: ${completed}\nDrivers pending: ${pendingDrivers}`);
+  // open stats / shift profiles menu
+  await sendStatsMenu();
         return;
       }
-      if (text === '⚙️SETTINGS') {
-        const kb = { reply_markup: { inline_keyboard: [[{ text: 'Manage QR', callback_data: 'settings:qr' }, { text: '⬅️ Go back', callback_data: 'back:menu' }], [{ text: `Archive ${SETTINGS.archiveDays}d`, callback_data: 'settings:archive' }]] } };
+        if (text === '⚙️SETTINGS') {
+      const kb = K.inline.adminSettingsKeyboard(SETTINGS.archiveDays, Boolean(SETTINGS.emojisMode));
         // show Settings header visibly again
         await bot.sendMessage(ADMIN_ID, 'Settings', kb);
         return;
       }
+
+        // continue profile creation flow if pending
+        if (global.adminPendingProfile && global.adminPendingProfile.step) {
+          const pending = global.adminPendingProfile;
+          if (pending.step === 'name') {
+            // admin sent profile name
+            pending.name = text || `Profile ${profileCounter}`;
+            pending.step = 'pin';
+            await bot.sendMessage(ADMIN_ID, 'Send a 4-digit numeric PIN for this profile (will be stored)');
+            return;
+          }
+          if (pending.step === 'pin') {
+            const pin = (text || '').trim();
+            if (!/^[0-9]{4}$/.test(pin)) {
+              await bot.sendMessage(ADMIN_ID, 'PIN must be 4 digits. Send PIN again.');
+              return;
+            }
+            pending.pin = pin;
+            pending.step = 'confirm';
+            await bot.sendMessage(ADMIN_ID, `Confirm PIN by sending it again to complete creation of profile '${pending.name}'`);
+            return;
+          }
+          if (pending.step === 'confirm') {
+            const pin = (text || '').trim();
+            if (pin !== pending.pin) {
+              // cancel
+              global.adminPendingProfile = null;
+              await bot.sendMessage(ADMIN_ID, 'PIN confirmation failed — profile creation cancelled.');
+              return;
+            }
+            // create profile
+            const profile = { id: profileCounter++, name: pending.name, pin: pending.pin, shifts: [], totalStars: 0, createdAt: Date.now() };
+            shiftProfiles.push(profile);
+            saveData();
+            global.adminPendingProfile = null;
+            await bot.sendMessage(ADMIN_ID, `Profile created: ${profile.name} (id:${profile.id})`);
+            // show profiles list again
+            await (async () => {
+              const rows = [];
+              rows.push([{ text: '➕ NEW PROFILE', callback_data: 'stats:new_profile' }]);
+              (shiftProfiles || []).forEach(p => rows.push([{ text: `${p.name || 'Profile'} (${p.id})`, callback_data: `stats:open:${p.id}` }]));
+              rows.push([{ text: '⬅️ Go back', callback_data: 'back:menu' }]);
+              await bot.sendMessage(ADMIN_ID, 'Profiles', { reply_markup: { inline_keyboard: rows } });
+            })();
+            return;
+          }
+        }
 
       // forwarded message -> create order
       const fchat = msg.forward_from_chat;
@@ -725,7 +769,7 @@ bot.on('message', async (msg) => {
             sendOrderToDriver(order, driver).catch(()=>{});
           }
         } catch(e) { /* ignore */ }
-        const kb = { reply_markup: { inline_keyboard: [[{ text: '⚡ GO', callback_data: `go:${order.order_id}` }, { text: '❌ Cancel', callback_data: `cancel:${order.order_id}` }]] } }; // eslint-disable-next-line no-unused-vars
+  const kb = K.inline.adminOrderQuickActions(order.order_id); // eslint-disable-next-line no-unused-vars
         try {
           const sent = await bot.sendMessage(ADMIN_ID, `Forwarded order created #${String(order.order_id).padStart(4,'0')} from ${customerName}\nItems: ${items}`, Object.assign(kb, { parse_mode: 'HTML', disable_web_page_preview: true }));
           if (sent && sent.message_id) adminSentMessages.set(sent.message_id, { orderId: order.order_id, type: 'new_order' });
@@ -895,6 +939,17 @@ bot.on('message', async (msg) => {
         const t = msg.text.trim();
         const drv = drivers.find(d => d.id === from.id);
         if (drv) {
+          // driver language toggle via reply keyboard buttons
+          if (t === '🇰🇭' || t.toUpperCase() === 'KH' || t.toUpperCase() === 'KHMER') {
+            drv.lang = 'kh'; saveData();
+            try { await bot.sendMessage(drv.id, 'ភាសា ត្រូវបាន ផ្លាស់ប្ដូរ ទៅ ខ្មែរ 🇰🇭'); } catch (e) {}
+            return;
+          }
+          if (t === 'EN' || t.toUpperCase() === 'ENGLISH') {
+            drv.lang = 'en'; saveData();
+            try { await bot.sendMessage(drv.id, 'Language set to English'); } catch (e) {}
+            return;
+          }
           if (t === 'CONNECT') {
             drv.status = 'online';
             try { await bot.sendMessage(msg.chat.id, tFor(from.id, 'now_online'), driverOnlineKeyboard); } catch (e) {}
@@ -1064,7 +1119,7 @@ bot.onText(/\/register/, async (msg) => {
     drivers.push({ id: from.id, name: `${from.first_name || ''} ${from.last_name || ''}`.trim(), username: from.username, status: 'pending' });
   }
   await bot.sendMessage(from.id, tFor(from.id, 'reg_sent'));
-  const buttons = { reply_markup: { inline_keyboard: [[{ text: '✅ Approve', callback_data: `drv_approve:${from.id}` }, { text: '❌ Reject', callback_data: `drv_reject:${from.id}` }]] } };
+  const buttons = K.inline.driverApprovalKeyboard(from.id);
   const sent = await notifyAdmin(`NEW DRIVER ${from.first_name || ''} wants to join.`, buttons);
   // store pending admin message so we can delete it when handled
   if (sent && sent.message_id) {
@@ -1247,6 +1302,94 @@ bot.on('callback_query', async (cb) => {
     return;
   }
 
+  // emojis mode toggle for admin UI
+  if (data === 'settings:emojis') {
+    SETTINGS.emojisMode = !Boolean(SETTINGS.emojisMode);
+    saveData();
+    const kb = K.inline.adminSettingsKeyboard(SETTINGS.archiveDays, Boolean(SETTINGS.emojisMode));
+    await bot.answerCallbackQuery(cb.id, { text: `Emojis mode ${SETTINGS.emojisMode ? 'enabled' : 'disabled'}` });
+    return bot.sendMessage(ADMIN_ID, 'Settings', kb);
+  }
+
+  // Admin stats / shift profiles callbacks
+  if (data.startsWith('stats:')) {
+    const parts = data.split(':');
+    const action = parts[1];
+    if (action === 'new_profile') {
+      // prompt admin for profile name
+      global.adminPendingProfile = { step: 'name' };
+      await bot.answerCallbackQuery(cb.id, { text: 'Creating new profile — send profile name now' });
+      return bot.sendMessage(ADMIN_ID, 'Please send the new profile name (one line)');
+    }
+    if (action === 'open') {
+      const id = Number(parts[2]);
+      const profile = (shiftProfiles || []).find(p => p.id === id);
+      if (!profile) { await bot.answerCallbackQuery(cb.id, { text: 'Profile not found' }); return; }
+      // show profile dashboard (HTML) with elapsed time for active shift
+      const connectedDrivers = (profile.activeShift && profile.activeShift.connectedDrivers) ? profile.activeShift.connectedDrivers.length : 0;
+      const totalStars = profile.totalStars || 0;
+      let statusLine = 'Not running';
+      if (profile.activeShift && profile.activeShift.startedAt) {
+        const startedAt = profile.activeShift.startedAt;
+        const elapsedMs = Date.now() - startedAt;
+        const mins = Math.floor(elapsedMs / 60000);
+        const hrs = Math.floor(mins / 60);
+        const remMins = mins % 60;
+        statusLine = `Started at ${new Date(startedAt).toLocaleString()} (running ${hrs}h ${remMins}m)`;
+      }
+      const textLine = `<b>📊 PROGRESSION</b> (${escapeHtml(profile.name)})\n${escapeHtml(statusLine)}\n<b>Connected drivers:</b> ${connectedDrivers}\n<b>Total stars:</b> ${totalStars}`;
+      const rows = [];
+      if (!profile.activeShift) rows.push([{ text: '▶️ Start shift', callback_data: `stats:start:${profile.id}` }]);
+      else rows.push([{ text: '⏹️ Close shift', callback_data: `stats:close:${profile.id}` }]);
+      rows.push([{ text: '⬅️ Back', callback_data: 'stats:list' }]);
+      await bot.answerCallbackQuery(cb.id, { text: 'Opening profile' });
+      return bot.sendMessage(ADMIN_ID, textLine, { parse_mode: 'HTML', reply_markup: { inline_keyboard: rows } });
+    }
+    if (action === 'start') {
+      const id = Number(parts[2]);
+      const profile = (shiftProfiles || []).find(p => p.id === id);
+      if (!profile) { await bot.answerCallbackQuery(cb.id, { text: 'Profile not found' }); return; }
+      // create activeShift minimal structure
+      profile.activeShift = { startedAt: Date.now(), connectedDrivers: [], closedAt: null };
+      saveData();
+      await bot.answerCallbackQuery(cb.id, { text: 'Shift started' });
+      return bot.sendMessage(ADMIN_ID, `Shift started for ${profile.name}`);
+    }
+    if (action === 'close') {
+      const id = Number(parts[2]);
+      const profile = (shiftProfiles || []).find(p => p.id === id);
+      if (!profile) { await bot.answerCallbackQuery(cb.id, { text: 'Profile not found' }); return; }
+      if (!profile.activeShift) { await bot.answerCallbackQuery(cb.id, { text: 'No active shift' }); return; }
+      // close shift: record closedAt and push to profile.shifts history
+      const shiftRec = Object.assign({}, profile.activeShift, { closedAt: Date.now() });
+      profile.shifts = profile.shifts || [];
+      profile.shifts.push(shiftRec);
+      // clear active shift
+      profile.activeShift = null;
+      saveData();
+      await bot.answerCallbackQuery(cb.id, { text: 'Shift closed and saved' });
+      return bot.sendMessage(ADMIN_ID, `Shift for ${profile.name} closed and saved.`);
+    }
+    if (action === 'list') {
+      // re-show profiles list
+      const rows = [];
+      rows.push([{ text: '➕ NEW PROFILE', callback_data: 'stats:new_profile' }]);
+      (shiftProfiles || []).forEach(p => rows.push([{ text: `${p.name || 'Profile'} (${p.id})`, callback_data: `stats:open:${p.id}` }]));
+      rows.push([{ text: '⬅️ Go back', callback_data: 'back:menu' }]);
+      await bot.answerCallbackQuery(cb.id, { text: 'Profiles' });
+      return bot.sendMessage(ADMIN_ID, 'Profiles', { reply_markup: { inline_keyboard: rows } });
+    }
+  }
+
+  // driver language switch (callback style)
+  if (data.startsWith('driver_lang:')) {
+    const lang = data.split(':')[1] || 'EN';
+    const drv = drivers.find(d => d.id === from.id);
+    if (drv) { drv.lang = String(lang).toLowerCase(); saveData(); }
+    await bot.answerCallbackQuery(cb.id, { text: `Language set to ${lang}` });
+    return;
+  }
+
   // driver approval flows
   if (data.startsWith('drv_approve:')) {
     const id = Number(data.split(':')[1]);
@@ -1276,6 +1419,14 @@ bot.on('callback_query', async (cb) => {
     if (part === 'completed') { await sendOrdersListToAdmin('COMPLETED'); return; }
     if (part === 'new') {
       const order = createOrder({ customer_name: cb.from.first_name || 'Admin', customer_id: cb.from.id });
+      // If exactly one driver is currently online, prefill driver's name for admin convenience
+      try {
+        const diskDrivers = readDriversFromDisk();
+        const onlineDrivers = diskDrivers.filter(d => d.status === 'online');
+        if (onlineDrivers.length === 1) {
+          order.driver_name = onlineDrivers[0].name || '';
+        }
+      } catch (e) { /* ignore */ }
       await bot.sendMessage(ADMIN_ID, 'New order created. Opening for edit...');
       await sendOrderDetailsToAdmin(order.order_id, true, ADMIN_ID, 'ORDERS');
       return;
@@ -1289,7 +1440,7 @@ bot.on('callback_query', async (cb) => {
       return;
     }
     if (part === 'settings') {
-      const kb = { reply_markup: { inline_keyboard: [[{ text: 'Manage QR', callback_data: 'settings:qr' }, { text: '⬅️ Go back', callback_data: 'back:menu' }], [{ text: `Archive ${SETTINGS.archiveDays}d`, callback_data: 'settings:archive' }]] } };
+      const kb = K.inline.adminSettingsKeyboard(SETTINGS.archiveDays, Boolean(SETTINGS.emojisMode));
       await bot.sendMessage(ADMIN_ID, 'Settings', kb);
       return;
     }
@@ -1409,7 +1560,7 @@ bot.on('callback_query', async (cb) => {
     const rows = qrCodes.map(q => [{ text: `${q.enabled ? '✅' : '⬜'} ${q.code}`, callback_data: `qr:send:${q.id}:${id}` }]);
     rows.push([{ text: 'Cancel', callback_data: 'back:menu' }]);
     await bot.answerCallbackQuery(cb.id, { text: 'Choose QR to send' });
-    return bot.sendMessage(ADMIN_ID, `Send which QR to order #${String(id).padStart(4,'0')}?`, { reply_markup: { inline_keyboard: rows } });
+  return bot.sendMessage(ADMIN_ID, `Send which QR to order #${String(id).padStart(4,'0')}?`, K.inline.sendQrToOrderKeyboard(id, qrCodes));
   }
 
   // send the chosen QR to the customer and mark order.payment_method=QR
@@ -1477,9 +1628,9 @@ bot.on('callback_query', async (cb) => {
     ord.order_status = 'pickedup'; ord.order_status_emoji = '⚡'; ord.driver_status = 'busy'; ord.driver_id = drv.id;
         await bot.answerCallbackQuery(cb.id, { text: 'You picked up the order' });
         // notify customer // eslint-disable-next-line no-unused-vars
-        if (ord.customer_id) await bot.sendMessage(ord.customer_id, `Your order #${String(id).padStart(4,'0')} has been picked up. Your driver ${drv.name} is on the way.`, { reply_markup: { inline_keyboard: [[{ text: '❔ETA', callback_data: `eta:${id}` }]] } });
+  if (ord.customer_id) await bot.sendMessage(ord.customer_id, `Your order #${String(id).padStart(4,'0')} has been picked up. Your driver ${drv.name} is on the way.`, K.inline.etaKeyboard(id));
         // send driver active keyboard
-    try { await bot.sendMessage(drv.id, 'Order active', { reply_markup: { inline_keyboard: [[{ text: '🏁 ARRIVED', callback_data: `driver_arrived:${id}` }, { text: '🗺️ LOCATION', callback_data: `driver_location:${id}` }, { text: '⏰ DELAY', callback_data: `driver_delay:${id}` }]] } }); } catch(e){}
+  try { await bot.sendMessage(drv.id, 'Order active', K.inline.driverActiveOrderKeyboard(id)); } catch(e){}
     saveData();
       }
       return;
@@ -1511,7 +1662,7 @@ bot.on('callback_query', async (cb) => {
             // construct a Google Maps directions link for driver convenience
             const gLink = `https://www.google.com/maps/dir/?api=1&origin=${originLat},${originLon}&destination=${lat},${lon}&travelmode=driving`;
             try {
-              await bot.sendMessage(cb.from.id, `🛵 Route preview:\nDistance: ${distanceText}\nETA: ${etaText}`, { reply_markup: { inline_keyboard: [[{ text: 'Open in Maps', url: gLink }]] } });
+              await bot.sendMessage(cb.from.id, `🛵 Route preview:\nDistance: ${distanceText}\nETA: ${etaText}`, K.inline.openInMapsKeyboard(gLink));
             } catch (e) {} // eslint-disable-next-line no-empty
             return;
           }
@@ -1525,9 +1676,11 @@ bot.on('callback_query', async (cb) => {
       const ord = orders.find(o => o.order_id === id);
       const drv = drivers.find(d => d.id === from.id);
       if (ord) {
-        ord.order_status = 'arrived'; ord.order_status_emoji = '🏁';
-        await bot.answerCallbackQuery(cb.id, { text: 'Marked as arrived' });
-        if (ord.customer_id) await bot.sendMessage(ord.customer_id, `Hi, here's ${drv ? drv.name : 'your driver'}, I'm just arrived at your place, please come to get your meal`, { reply_markup: { inline_keyboard: [[{ text: 'OK', callback_data: `cust_ok:${id}` }]] } }); // eslint-disable-next-line no-unused-vars
+    ord.order_status = 'arrived'; ord.order_status_emoji = '🏁';
+    // stop any live session for this driver/order
+    try { stopLiveSession(from.id, id); } catch (e) {}
+    await bot.answerCallbackQuery(cb.id, { text: 'Marked as arrived' });
+  if (ord.customer_id) await bot.sendMessage(ord.customer_id, `Hi, here's ${drv ? drv.name : 'your driver'}, I'm just arrived at your place, please come to get your meal`, K.inline.customerOkKeyboard(id)); // eslint-disable-next-line no-unused-vars
       }
       return;
     }
@@ -1546,7 +1699,7 @@ bot.on('callback_query', async (cb) => {
       const drv = drivers.find(d => d.id === from.id);
       if (drv) {
         await bot.answerCallbackQuery(cb.id, { text: 'Select delay' });
-        try { await bot.sendMessage(drv.id, 'Select delay: 2mn, 5mn, +10mn', { reply_markup: { inline_keyboard: [[{ text: '2mn', callback_data: `delay:2:${id}` }, { text: '5mn', callback_data: `delay:5:${id}` }, { text: '+10mn', callback_data: `delay:10:${id}` }]] } }); } catch(e){}
+  try { await bot.sendMessage(drv.id, 'Select delay: 2mn, 5mn, +10mn', K.inline.delayOptionsKeyboard(id)); } catch(e){}
       } // eslint-disable-next-line no-unused-vars
       return;
     }
@@ -1598,7 +1751,7 @@ bot.on('callback_query', async (cb) => {
     // admin settings and QR management
     if (data === 'settings:open') {
       await bot.answerCallbackQuery(cb.id, { text: 'Settings' });
-      const kb = { reply_markup: { inline_keyboard: [[{ text: 'Manage QR Codes', callback_data: 'settings:qr' }, { text: 'Back', callback_data: 'back:menu' }]] } };
+  const kb = K.inline.adminSettingsKeyboard(SETTINGS.archiveDays, Boolean(SETTINGS.emojisMode));
       return bot.sendMessage(ADMIN_ID, 'Settings', kb);
     }
   // rotation UI removed — present only archive options and QR management // eslint-disable-next-line no-unused-vars
@@ -1609,7 +1762,7 @@ bot.on('callback_query', async (cb) => {
           [{ text: '7d', callback_data: 'settings:set:archiveDays:7' }, { text: '14d', callback_data: 'settings:set:archiveDays:14' }],
           [{ text: '30d', callback_data: 'settings:set:archiveDays:30' }, { text: '⬅️ Go back', callback_data: 'back:menu' }]
         ];
-        return bot.sendMessage(ADMIN_ID, `Current archive days: ${SETTINGS.archiveDays}`, { reply_markup: { inline_keyboard: rows } });
+  return bot.sendMessage(ADMIN_ID, `Current archive days: ${SETTINGS.archiveDays}`, K.inline.archiveDaysKeyboard(SETTINGS.archiveDays));
       }
       if (data.startsWith('settings:set:')) {
         const parts = data.split(':');
@@ -1626,13 +1779,13 @@ bot.on('callback_query', async (cb) => {
       await bot.answerCallbackQuery(cb.id, { text: 'QR management' });
       const rows = qrCodes.map(q => [{ text: `${q.enabled ? '✅' : '⬜'} ${q.code}`, callback_data: `qr:toggle:${q.id}` }, { text: '⚙️', callback_data: `qr:opts:${q.id}` }]);
       rows.push([{ text: '➕ Add QR', callback_data: 'qr:add' }, { text: '⬅️ Back', callback_data: 'back:menu' }]);
-      return bot.sendMessage(ADMIN_ID, 'QR Codes', { reply_markup: { inline_keyboard: rows } });
+  return bot.sendMessage(ADMIN_ID, 'QR Codes', K.inline.qrCodesListKeyboard(qrCodes));
     }
     if (data.startsWith('qr:opts:')) {
       const id = data.split(':')[2] || data.split(':')[1];
       const q = qrCodes.find(x => String(x.id) === String(id));
       if (!q) return await bot.answerCallbackQuery(cb.id, { text: 'QR not found' });
-      const kb = { reply_markup: { inline_keyboard: [[{ text: '🔍 Preview', callback_data: `qr:preview:${q.id}` }, { text: '🗑️ Delete', callback_data: `qr:del:${q.id}` }], [{ text: '⬅️ Back', callback_data: 'settings:qr' }]] } };
+  const kb = K.inline.qrOptionsKeyboard(q);
       await bot.answerCallbackQuery(cb.id, { text: 'QR options' });
       return bot.sendMessage(ADMIN_ID, `Options for ${q.code}`, kb);
     }
@@ -1776,7 +1929,7 @@ bot.onText(/\/complete (\d+)/, async (msg, match) => {
   ord.order_status = 'completed'; ord.order_status_emoji = '✅'; ord.driver_status = 'online';
   await bot.sendMessage(msg.chat.id, `Completed order #${String(id).padStart(4,'0')}`);
   if (ord.customer_id) { // eslint-disable-next-line no-unused-vars
-    await bot.sendMessage(ord.customer_id, `Thank you for ordering! Please rate your delivery experience.`, { reply_markup: { inline_keyboard: [[{ text: '1', callback_data: `fb:1:${id}` }, { text: '2', callback_data: `fb:2:${id}` }, { text: '3', callback_data: `fb:3:${id}` }, { text: '4', callback_data: `fb:4:${id}` }, { text: '5', callback_data: `fb:5:${id}` }]] } });
+  await bot.sendMessage(ord.customer_id, `Thank you for ordering! Please rate your delivery experience.`, K.inline.feedbackKeyboard(id));
   }
   saveData();
 });

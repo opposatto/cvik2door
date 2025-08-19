@@ -1,29 +1,44 @@
 # TODO — Unlimited-bot
 
-This file records the feature gaps, partial implementations, completed tasks and debugging items derived from comparing `initial-prompt.txt` (expected behaviour) and `index.js` (current scaffold).
-
-- Status legend
-
-- Done: implemented and present in `index.js`.
-
-- Partial: scaffolding or placeholders exist, but flow is incomplete or unverified.
-
-- Not implemented: no evidence in `index.js`.
-
-- Debug: anomaly or unclear behaviour that needs investigation.
-
 ## Summary checklist (high level)
-
+admin orders
 - [x] Create sample order command (`/create_new_order`) — Done
-- [ ] Full admin UI & order editing flows — Partial
-- [ ] Driver registration + approval + connect/online lifecycle — Partial
+admin stats:
+need to keep track of different shifts, the simple way, creating a new profile, prompt only for name and 4 digits password with confirmation.
+create sub-menu: [NEW PROFILE], [new profile created name 1], [new profile created name 2], [new profile created name 3].
+stats start when a shift is opened, when a new profile connects.
+add a fancy title: 📊 PROGRESSION (`profile_name`), 
+add new fields Connected drivers, total stars (total star collected from all the drivers), shift started since `stopwatch_value`
+attach inline button [Close shift] on close save the shift details under profile name (backend only)
+
+
+
+admin settings
+-manage admin
+,
+*create new function , need to set 5186573916 is superadmin)* [➕ADD] button, generate a 1 time use bot link to forward to a user to be promoted as admin, when user click the link, bot reply "Registration processing, please wait a few moment...", prompt super admin for approval, need to suspend/lock superadmin account, need to set a new reply blocked keyboard;  [⚠️UNBLOCK], [📊STATS], all admins feature are assigned to new admin, superadmin would have to press UNBLOCK to gain access back to his interface, previous admin account is suspended (frozen interface) until superadmin reactivate admin account from Manage admin settings.
+
+-manage qr
+-manage driver
+-emoji mode (no label mode for admin)
+
+driver
+- Driver language 
+-live location with customer 
+-live location with admin
+
+customer
 - [ ] Customer ordering flows (text/contact/location mapping) — Partial
-- [ ] Payment / QR flows (add/activate QR, currency/bank selection) — Partial / Not implemented
-- [x] In-memory stores (`orders`, `drivers`, `customers`, `sessions`, `qrCodes`) — Done
-- [x] Persistence hooks (`loadData`, `saveData`) — Partial (functions exist; verify correctness)
-- [ ] Live session timers & expiry scheduling — Partial
- - [ ] Polling error backoff / webhook deletion logic — Partial
-- [ ] Inline callback handlers and detailed inline keyboards — Partial
+- [ ] Payment / QR flows
+- [ ] Live session timers & expiry scheduling 
+
+keyboards
+- [ ] Inline callback handlers and detailed inline keyboard
+- back button (emoji and behavior).
+-remove back buttons from list views
+-driver keyboard (driverReadyKeyboard) is wrong, it has on pickup and map buttons.
+remove start button (this function should be assigned to location button driverActiveOrderKeyboard )remove stop live button (stop live automatically when driver press ARRIVED button from driverActiveOrderKeyboard)
+
 
 ## Feature mapping (concise)
 
