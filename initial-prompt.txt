@@ -1,0 +1,323 @@
+tgbot  /in-memory database
+
+`*` are abstract variable names, or variable values, I just give the logic.
+[*] is used for keyboard layouts and keyboard buttons, and set of inline buttons.
+{*} is used to to determine a specific a mode or a type of view, related with conditions and/or constraint.
+(*) is used for optional elements and additional instructions.
+"*" bot messages sent to admin, driver and customer.
+
+AN ORDER IS ALWAYS DISPLAYING USING ORDER TEMPLATE WITHIN TELEGRAM (front-end):
+Displaying all fields, if no value set (null) just leave the field value empty. 
+🆕 #;
+👤;
+📍;
+💲* BY *;
+(💰;
+💱;)
+🚀 ;
+📃 ;
+(⭐;)
+📅;
+
+ORDER TEMPLATE, BACK END DEFINITIONS:
+`order_status_emoji`+`order_id`=`🆕` `#`;
+`customer`=`👤`;
+`location_link`:=`📍`;
+`total_amount`(+`paid_status`)BY `payment_method`=`💲`;
+`PAID` no emoji displaying as uppercase text ;
+`CASH` no emoji displaying as uppercase text;
+`QR` no emoji displaying as uppercase text;
+if `CASH` selected need to display extra rows:
+`given_cash`=`💰`;
+`change_cash`=`💱`;
+`driver`=`🚀`(replaced by `🔵` when driver `assigned` replaced by `🟡` when `pickedup` reset to default `🚀` when `completed`;
+`items`=`📃`;
+`feedback`=`⭐`(emoji and value are added at the end of the flow, once set by the customer);
+`date_time_stamp`=`📅`;
+
+ORDER TEMPLATE Type of values: 
+🆕 #: emoji #`order_id` (integrer, 0001 incremental by system) / nullable=false (all other fields are nullable for new orders in the admin interface);
+👤: `customer_name` (link to `customer_username`(telegram username));
+📍: `map_link`(map url) or `location`(text);
+💲* BY *; `total_amount`(number with decimal)+`paid_status`(PAID)+BY+`payment-method`(CASH or QR);
+(💰;`given_cash`(integrer);
+💱;)`change_cash`(int)(calculated by system (`given_cash`-`total_amount`=`change_cash`));
+🚀 ;`driver_name`(link to `driver_username`(telegram username), if only 1 driver is connected he's automatically added;
+📃 ;`items`(text);
+(⭐;)`feedback`(1, 2, 3, 4 or 5);
+`📅``date_time_stamp`;
+
+ORDER DETAILS Example 1: 
+⚡#0002
+👤kali
+📍maplink
+💲23.50 PAID by QR 
+🟡 John
+📃beef burger x2
+    coffee x1
+    coke x2	
+(this order is on the way to the customer place).
+📅
+
+ORDER DETAILS Example 2:
+🗃️ #0001
+👤 ilak
+📍 minimart 53st
+💲 55 PAID BY CASH
+💰 100
+💱 45
+🚀 Jane
+📃 details on invoice
+⭐ 5
+(this order has been `completed` successfully and `archived`).
+📅
+
+ORDER DETAILS Example 3:
+🆕 #0003
+👤alik
+📍maplink
+💲
+🚀 doe
+📃
+📅 
+(this is a `new_forwarded_order` in `edit_mode`).
+
+ORDER STATUS AND ORDER STATUS EMOJIS `order_status`(back-end)=`order_status_emoji`(front-end, no label):
+`order_status``order_status_emojis`(`constraint`);
+new 🆕(new_draft_order, new_forwarded_order, new_online_order);
+assigned 🛍️(`go_button_clicked`);
+pickedup⚡(`pickedup_button_clicked`);
+arrived 🏁(`arrived_button_clicked`);
+completed ✅(`completed_button_clicked`);
+archived 🗃️(`archived_button_clicked`);
+cancelled❌(`cancel_button_clicked`);
+
+ORDER STATUS explained
+NEW ORDERS (ORDERS section)
+`new_draft_order` `🆕` : A new created order created by Admin using create new draft from admin menu.
+`new_forwarded_order``🆕`: A newly created order by Admin by forwarding a user message containing a map link to the bot.
+`new_online_order``🆕`: A new order created online by customer using the bot.
+ACTIVE ORDERS (ACTIVE section)
+`assigned` `🛍️`: Set by Admin when clicking on [⚡GO] button.
+`pickedup` `⚡`: Set by driver when clicking on [🛍️PICKUP] button.
+`arrived``🏁`: Set by Driver or by system when clicking on [🏁ARRIVED] button, or when the driver enter in radius zone
+COMPLETED ORDERS (COMPLETED section)
+`completed`✅`: Set by driver when clicking on [✅COMPLETED] button.
+`cancelled``❌`: The order has been cancelled by an admin.
+`archived``🗃️`: Set by admin when clicking on [🗃️ARCHIVE] button.
+
+ADMIN INTERFACE ADMIN MENU KEYBOARD BUTTONS (not inline)
+1row: [📥ORDERS], [⚡ACTIVE], [✅COMPLETED].
+2row:[📊STATS], [⚙️SETTINGS].
+when opening a section orders in it are displayed as inline buttons to be clickable(openable) and showing full detail:
+order as inline button [`order_status_emoji`#`order_id` for `customer_name` by `driver_name``driver_status`].
+
+when an order is showing full details in admin interface (sent as a message from bot or displayed as a message when selected from a list in a section), EDIT MODE IS ENABLED and EDIT KEYBOARD REPLACE MENU KEYBOARD. 
+[edit_keyboard] layout:
+1st row: [CASH], [QR], [PAID], [💲`total_amount`].
+2nd row: [⚡Go] (Send the order to the driver), [❌ cancel], [⬅️ go back] (exit edit mode and showing back MENU KEYBOARD).
+
+EDIT MODE is always set with EDIT KEYBOARD
+Sending or forwarding different type of content to the bot to edit corresponding field,.
+replacing existing value (except `items` new text sent (new values) are added to existing.
+a map link to update `map_link`;
+a telegram contact object to update `customer`;
+a monetary value starting with $ to update `total_amount`;
+plain text is added to `items` field.
+
+Edited values are saved automatically:
+
+ORDERS SECTION includes:
+order with following status: `new_draft_order`, `new_forwarded_orders` and `new_online_orders`.
+selecting one display it with full details in edit mode with edit keyboard.
+
+ACTIVE SECTION includes:
+order with `assigned`, `pickedup` and `arrived` status. (all order sent to a driver).
+an order selected from a list in this section is showing full details ACTIVE ADMIN KEYBOARD is set.
+[active_admin_keyboard] layout:
+1st row: [✏️EDIT], [🗺️driver_name], [⬅️ GO BACK].
+
+COMPLETED SECTION include orders with status: `completed`, `canceled`, and `archived`.
+[sub_menu_keyboard]:
+1st row: [✅COMPLETED], [❌CANCELED], [ARCHIVED🗃️].
+when an order is selected from a list it displays selected order with full details and sets corresponding keyboard: 
+completed order sub-section keyboard:
+1st row: [⬅️PREV],[🗃️],[➡️NEXT];
+canceled order sub-section keyboard:
+1st row: [⬅️PREV],[❌](to delete definitely),[➡️NEXT];
+archived order sub-section:
+1st row: [⬅️PREV],[❌](to delete definitely from front-end only),[➡️NEXT];
+[⬅️PREV] button to navigate to previous order with full details view.
+[➡️NEXT] button to navigate to the next order with full details view.
+all these 4 keyboard showing:
+2nd row: [↩️GO BACK].
+ 
+ADMIN SETTINGS MENU
+[QR Codes: [➕ NEW QR] to add new, then showing existing using {list_view}, when opening existing from the list, attach inline buttons: [✏️EDIT],[🔴DISABLE] 
+(if set to enabled, if not [🟢ACTIVATE] to enable, only 1 qr enabled at a time, enabling a qr disable any previous enabled).
+[Drivers]: [➕ DRIVER] to add new (display a predefined message in Khmer language to register with a bot link that run  /register command), driver registering this way no need approval, he can use [🟢 CONNECT] button directly.
+Showing existing using {list_view}, when opening existing from the list (`driver_status`+`driver_name`+`total_stars`) when opening showing as a contact card (telegram function).
+attach inline buttons: if driver is blocked showing a warning: "⚠️ Driver is blocked  Unblock?" inline button attached to the text [OK], [⬅️].
+[RESTAURANT MENUS]: [Food menu en], [Food menu ru], [Drink menu en], [Drink menu ru] (select menu to edit, sending media using telegram function, media should be sent grouped as a single message, new set of media will replace existing one).
+[Advanced] 
+[Admins]: [➕ ADD NEW] to add a new admin (generating a temporary link to forward, on click user is added as admin) then showing existing using {list_view}, when opening existing from the list, attach inline buttons: [⛔ BLOCK],[🟢UNBLOCK],[❌DELETE];
+[No label mode] {emoji_mode}: switch to use emoji only (displaying buttons without labels, admin interface only, except settings menu), if `emoji_mode_enabled` show `label_mode` instead to restore normal mode.
+[Data]; [AUTO], in-memory databases are saved automatically daily at 00:00 (this option has been created for future use, in case of slow performances or bug, implementation will be improved),
+
+SETTINGS FLOWS:
+QR CODE FLOW:
+([➕ NEW QR] flow:
+Take, send or forward a picture:
+Select devise: [USD],[KHR];
+Select bank:
+[ACLEDA];
+[ABA];
+[BAKONG];
+[HUYONE];
+[KHOR](common protocol);
+[OTHER];
+Saved! This is the first QR registered, it has been activated!)
+
+DRIVER STATS:
+[📊STATS] to display order summaries, opening using {card_view};
+`🟢``connected_time`;
+`⏰``waiting_time`;
+`⚡``driving_time`.;
+`✅``order_completed`;
+`⭐`` total_stars`;
+`📅``date_time_stamp`;
+Set [summary_keyboard]:[]
+1st row: [⬅️PREV], [➡️NEXT];
+2nd row: [↩️BACK TO MENU];
+
+SESSIONS AND DATA RETENTION
+admin is always connected and available (24/7), [reset shift] button from the settings, archives all completed orders.
+
+NOTIFICATION SYSTEM MESSAGES (TOASTS):  
+Bot handles sending different types of messages, direct in a chat, pop up from chat, notification messages (can be silent) and toast notifications.
+All driver actions (keyboard buttons) are notified to admin using toasts, (`driver_name` just picked up `customer_name` order. `driver_name` is sharing location with `customer_name`. `driver_name` noticed `customer_name` about `delay_value` delay. `driver_name` is arrived at `customer_name` place. `driver_name` has completed `customer_name` order. `customer_name` gave `feedback_note` to `driver_name`.  
+By default, all action executed by admin and drivers from their interface return a short toast message confirmation (without values) : "Order sent", "Connected", "Reply sent", "Message sent", "Sharing live location started", etc...
+
+IN-MEMORY DATA STORES:
+The following arrays and maps will serve as in-memory databases:
+`orders: Order[]`;
+`drivers: Driver[]`;
+`customers: Customer[]`;
+`sessions: Session[]`;
+`qrCodes: QRCode[]`;
+
+TRANSLATION:
+/kh to use khmer translation for driver interface (translations are hard coded).
+/en to set driver interface language in english.
+
+LIST OF AVAILABLE COMMANDS:
+/cancel command allows a driver to force cancelling the active order.
+/settings
+
+SPECIFIC CASES:
+/help command opens a chat session from customer interface directly with admin using bot to send and forward messages:
+"Direct chat session with admin started",
+"Ask your question to connect the chat"[END SESSION], 
+notify admin "Attention required from `customer_name`)",
+"Direct chat session with `customer_name` initialized..."[END SESSION],
+"`customer_name` say: `customer_request`".
+
+CUSTOMER FLOW (/start):
+/start command-> set items with bot -> set location with bot -> admin request payment method -> pay online with bot -> admin send order to driver -> driver pick up order (customer session with driver remains open till completing the process) -> driver sets arrived -> customer receive goods and give cash to driver to complete the payment process-> driver sets completed -> customer feedback -> admin archive order to save customer data.
+
+CUSTOMER ONLINE ORDERING FLOW `new_online_order` using chat with bot:
+/start command from bot, first time connection, first time ordering:
+when chatting with bot [BUTTON] are inline buttons (cust1:omer flow uses only inline buttons attached to the bot message, not keyboards layout are defined for customer)
+"Please choose your language:" [flag English], [flag Russian].
+"Messages sent to the bot will be forwarded to admin, you can ask for /help or any special request anytime".
+"Welcome `customer_name`, please share your location" [🗺️SHARE LOCATION].
+"Noted, thank you, now text me the items you would like to order" [`food_menu`], [`drink_menu`] (hidden if not set from admin interface), [📤SEND ORDER].
+"Excellent choice! Your order has been sent to admin, you will receive a confirmation in a minute.".
+"Order approved! Total💲`total_amount` Please select a payment method:" [CASH], [QR].
+if [QR] selected bot sends `enabled_qr_picture` with message: "Total: `total_amount` , Scan to proceed with the payment, once the payment sent, press done button"[☑️DONE];
+"Thank you for your payment! have a good day and see you next time in the metaverse!".
+if [CASH] selected: "What cash devise  will you use?"[USD],[KHR], "Select predefined `selected_devise` amount note or send custom amount using"if [USD]: [$10], [$20], [$50], [$100], if [KHR]: [50k], [80k], [100k], [150k];
+"Thank you, your driver has been notified and will care about your change, you will be notified when your order will be on the way."
+if `change_cash`<2 [Change is less than 2$ TIP (`change_cash`) to support your driver].
+->DRIVER FLOW.
+
+DRIVER FLOW (MESSAGES SENT TO CUSTOMER)
+`pickedup_message`: 1st message: 
+"Your order `order_id` has been picked up, Your driver is on the way and should be at destination within 20 minutes" (wait 5 secondes and send 2nd message):
+"If your driver is late, you use can use ❔button to ping the driver, he will send you ETA" [❔ETA] inline button
+`arrived_message`: 
+"Hi, here's `driver_name`, I'm just arrived at your place, please come to get your meal" [OK] inline button sends message to the driver: "`customer_name` is coming" .
+`completed_message`:
+ "Thank you for ordering with us dear `customer\_name`! 🤗" wait 5 seconds send `feedback_message`: ''Please rate your delivery experience ⭐, send any text to the bot as a feedback" [1],[2],[3],[4],[5].
+[1]-[5] buttons: bot reply to the customer:
+"Thank you, CVIK2 team wish you a good day, or a good night, we wish you both! 😁" .
+bot sends `feedback_text` as a message to admin: "Some important words from `customer_name`".
+bot sends `feedback_note`⭐ as a message to driver: "`customer_name`" gave you `feedback_note`⭐ (if `4⭐` or `5⭐` add "Really good job 💪")" and,
+⭐ field and `feedback_note``feedback_text` values are added to the order and,
+wait 5 minutes before closing customer session, bot sends silent message to customer: "Session terminated, thank you for you personal data, reselling them is profitable and generate good side incomes, unfortunately it doesn't but we keep them to make your next order even faster! *messages sent to the bot are fowarded to admin".
+
+[❔ETA] button: it sends a message to the driver: "Customer is waiting for a while and want to know about ETA".
+[2mn],[5mn],[+10mn],[🗺️location] inline buttons.
+[delay_keyboard] buttons (predefined buttons to notice politely a delay to a customer):
+[2mn] button: "Hi, here's ``driver_name`, I am really close, just a couple of minutes 🙏";
+[5mn] button: "Hi, here's ``driver_name`, traffic is dense, I am not far. Give me 5 minutes 🙏";
+[+10mn] button: "Hi, here's ``driver_name`, I am sorry we are busier than usual. I am on the way and doing my best to deliver your meal in about 10 minutes. Thank you for your patience";
+Driver press [🗺️location] button, it sends drivers live location to customer (validity 30mn, ends when [✅COMPLETED] is pressed). 
+
+ADMIN ONLINE ORDER FLOW:
+`new_online_order` -> edit mode (edit any value) -> admin sets `total_amount` -> triggers bot flow `order_approved` (bot ask the customer about the payment) CUSTOMER FLOW -> DRIVER FLOW.
+`new_draft_order` (forward a draft to customer, triggers `online_order_flow` if user didn't initialize a chat with bot it will return an error "Unknown customer, need to send bot link to customer using manager account" (displaying a message with bot link that runs /start command) ) and `new_forwarded_order`
+Admin edit fields -> prompt customer for items items clicks `Go` -> order sent to driver and to the customer  -> `order_status` set as `assigned` -> `driver_status` set as `ready` -> driver clicks pickup -> `order_status` set to `pickedup` -> `arrived` (Driver or admin clicks `Arrived`) -> `completed` (Driver or admin clicks `Completed`) -> `Archived` admin set as.
+
+ORDER SENT TO DRIVER {card_view} (driver interface does not include edit mode):
+admin pressed [⚡GO] button, with driver assigned `driver_status``ready 🔵`:
+{card_view} `driver_active_order` 
+[ready_keyboard]: [🛍️ PICKUP],[🛣️ROUTE]
+[🛍️ PICKUP] button clicked send `pickedup_message` to customer and replace [pickup_keyboard] with [active_driver_keyboard](1row): [🏁arrived], [🗺️location], [⏰delay].
+[🛣️Route] button when clicked display a map preview with details:
+🛵 `total_distance` Km;
+📍 `distance_to_destination`;
+🕝 ETA `eta_timer` minutes;
+🏁 Time at destination `eta_time`;
+
+[🏁ARRIVED] button clicked send `arrived_message` to the customer and replace [active_driver_keyboard] with [arrived_keyboard](1row,1 button) :[✅COMPLETED].
+[🏁ARRIVED] is triggered automatically when `driver_is_near``map_link_location``radius_50` (radius <50 meters), button still showing if `driver_is_near` failed to run.
+
+[🗺️location] button clicked sends live location to customer  (validity 30mn, ends when [✅COMPLETED] is pressed).
+[⏰delay] button clicked shows [delay_keyboard]:[2mn],[5mn],[+10mn],[⬅️go back].
+[✅COMPLETED] button triggers a message to the customer `completed_message`, set `order_status` -> `completed``✅` -> `driver_status``🟢``online`.
+
+DRIVER FLOW (/register or /connect or /login):
+/register command -> admin approval -> `offline 🔴 ` -> driver press [🟢CONNECT] button to change his status to `online 🟢` -> Driver receive order from admin `driver_status` set as `ready 🔵` -> driver press [🛍️PICKUP] button, `driver_status` `busy 🟡`  -> driver press [✅ COMPLETED] `driver_status` `online 🟢` -> driver press [🔴DISCONNECT] `driver_status` `offline 🔴`.
+
+ADMIN FLOW DRIVER REGISTRATION AND CONNECTION:
+/register command to register as a new driver, send message to admin: "NEW DRIVER `name` wants to join the team " showing contact/profile card, [YESSS] and [NO WAY] inline buttons are attached.
+[YESS] button reply "Registration approved! Welcome in the CVIK2 team `driver\_name`!
+connect to start receiving order" [CONNECT] inline button, [driver_connect_keyboard](1 row, 1 button): [🟢CONNECT].
+[NO WAY] button, reply "Ok if you work for free".
+[🟢CONNECT] button clicked, driver is connected and can be assigned to orders, showing [driver_keyboard]: 1st row: [⚡ACTIVE], [✅ COMPLETED], [🗺️ LOCATION](to send live location to admin);
+2nd row: [🔧SETTINGS], [⭕LOGOUT].
+/connect and /login commands to appear online for registered drivers.
+/disconnect and logout commands to appear offline, (if sent and driver still have active orders, pops up "⚠️ Please, complete all your assigned tasks in order to logout", after 3 attempts driver is blocked `driver_status``blocked``⚠️`, account need to be unfrozen by admin), on logout bot sends shift summary (`shift_summary` are saved and accessible from admin interface, driver details):
+using {card_view};
+`🟢``connected_time`;
+`⏰``waiting_time`;
+`⚡``driving_time`.;
+`✅``order_completed`;
+`⭐`` total_stars`;
+`📅``date_time_stamp`;
+
+DRIVER SETTINGS:
+[KH],[EN]. (change driver interface language) (all elements are translated except orders details).
+[AUTO],[🛣️Route], [🗺️location], [⏰delay].
+can set for each:
+[ALWAYS SEND], [SEND WHEN REQUESTED], [ATTACH TO PING](prompt to allow).
+
+DRIVER STATUS:
+`🟢` `online`: The driver is available to accept new orders. (also set when clicking on completed).
+`🔴` `offline`: The driver is not available.
+`🟡` `busy`: The driver has picked up an order, driving.
+`🔵` `assigned`: The driver has received an order but has not yet pick it up,
+`⚠️` `blocked`: blocked by admin, connection refused.
+
+

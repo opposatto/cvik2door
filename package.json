@@ -1,0 +1,17 @@
+{
+  "name": "unlimited-bot",
+  "version": "0.1.0",
+  "description": "Telegram bot scaffold with in-memory DB (long-polling). Uses node-telegram-bot-api and dotenv.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "install-deps": "npm install"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.1",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}

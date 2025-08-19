@@ -1,0 +1,51 @@
+{
+  "orders": [
+    {
+      "order_id": 999999,
+      "customer_name": "bak-test"
+    },
+    {
+      "order_id": 999999,
+      "order_status": "assigned",
+      "order_status_emoji": "🛍️",
+      "customer_name": "persistence-tester",
+      "customer_id": null,
+      "map_link": "",
+      "total_amount": 0,
+      "paid_status": "",
+      "payment_method": "",
+      "given_cash": null,
+      "change_cash": null,
+      "driver_name": "Kali",
+      "driver_assigned": true,
+      "driver_status": "assigned",
+      "items": "test",
+      "feedback": null,
+      "date_time_stamp": "2025-08-19T12:49:12.276Z",
+      "driver_id": 2023372448
+    }
+  ],
+  "drivers": [
+    {
+      "id": 2023372448,
+      "name": "Kali",
+      "username": "Kali_forever",
+      "status": "online"
+    }
+  ],
+  "customers": [
+    {
+      "id": 5186573916,
+      "name": "Kali",
+      "username": "grandkali"
+    }
+  ],
+  "sessions": [],
+  "qrCodes": [],
+  "orderCounter": 1000000,
+  "SETTINGS": {
+    "archiveDays": 7,
+    "groupLogRotateBytes": 5242880,
+    "adminTempTTL": 120000
+  }
+}

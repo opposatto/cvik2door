@@ -1,0 +1,215 @@
+[dotenv@17.2.1] injecting env (4) from .env -- tip: ΓÜÖ∩╕Å  suppress all logs with { quiet: true }
+Loaded data from C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\data.json
+Webhook cleared (if any). Starting long polling...
+Bot started. Waiting for updates...
+getWebHookInfo: {
+  "url": "",
+  "has_custom_certificate": false,
+  "pending_update_count": 0
+}
+[polling_error] ETELEGRAM ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running ΓÇö suppressing further identical errors for 1s (count=1)
+Error: ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+    at C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\node-telegram-bot-api\src\telegram.js:316:15
+    at tryCatcher (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\util.js:16:23)
+    at Promise._settlePromiseFromHandler (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:547:31)
+    at Promise._settlePromise (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:604:18)
+    at Promise._settlePromise0 (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:649:10)
+    at Promise._settlePromises (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:729:18)
+    at _drainQueueStep (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:93:12)
+    at _drainQueue (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:86:9)
+    at Async._drainQueues (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:102:5)
+    at Async.drainQueues [as _onImmediate] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:15:14)
+    at process.processImmediate (node:internal/timers:491:21)
+[polling_error] stopped polling; will restart in 1s
+[polling_error] restarted polling after backoff
+[polling_error] ETELEGRAM ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running ΓÇö suppressing further identical errors for 1s (count=1)
+Error: ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+    at C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\node-telegram-bot-api\src\telegram.js:316:15
+    at tryCatcher (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\util.js:16:23)
+    at Promise._settlePromiseFromHandler (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:547:31)
+    at Promise._settlePromise (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:604:18)
+    at Promise._settlePromise0 (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:649:10)
+    at Promise._settlePromises (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:729:18)
+    at _drainQueueStep (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:93:12)
+    at _drainQueue (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:86:9)
+    at Async._drainQueues (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:102:5)
+    at Async.drainQueues [as _onImmediate] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:15:14)
+    at process.processImmediate (node:internal/timers:491:21)
+[polling_error] stopped polling; will restart in 1s
+[polling_error] restarted polling after backoff
+[polling_error] ETELEGRAM ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running ΓÇö suppressing further identical errors for 1s (count=1)
+Error: ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+    at C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\node-telegram-bot-api\src\telegram.js:316:15
+    at tryCatcher (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\util.js:16:23)
+    at Promise._settlePromiseFromHandler (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:547:31)
+    at Promise._settlePromise (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:604:18)
+    at Promise._settlePromise0 (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:649:10)
+    at Promise._settlePromises (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:729:18)
+    at _drainQueueStep (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:93:12)
+    at _drainQueue (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:86:9)
+    at Async._drainQueues (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:102:5)
+    at Async.drainQueues [as _onImmediate] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:15:14)
+    at process.processImmediate (node:internal/timers:491:21)
+[polling_error] stopped polling; will restart in 1s
+[polling_error] restarted polling after backoff
+[polling_error] EFATAL EFATAL: Error: read ECONNRESET ΓÇö suppressing further identical errors for 1s (count=1)
+RequestError: Error: read ECONNRESET
+    at new RequestError (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\errors.js:14:15)
+    at plumbing.callback (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\plumbing.js:87:29)
+    at Request.RP$callback [as _callback] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\plumbing.js:46:31)
+    at self.callback (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\@cypress\request\request.js:183:22)
+    at Request.emit (node:events:524:28)
+    at Request.onRequestError (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\@cypress\request\request.js:869:8)
+    at ClientRequest.emit (node:events:524:28)
+    at emitErrorEvent (node:_http_client:104:11)
+    at TLSSocket.socketErrorListener (node:_http_client:518:5)
+    at TLSSocket.emit (node:events:524:28)
+    at emitErrorNT (node:internal/streams/destroy:170:8)
+    at emitErrorCloseNT (node:internal/streams/destroy:129:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+[polling_error] stopped polling; will restart in 1s
+[polling_error] restarted polling after backoff
+[polling_error] EFATAL EFATAL: Error: read ECONNRESET ΓÇö suppressing further identical errors for 2s (count=2)
+[polling_error] stopped polling; will restart in 2s
+[polling_error] restarted polling after backoff
+[polling_error] EFATAL EFATAL: Error: connect ETIMEDOUT 149.154.167.220:443 ΓÇö suppressing further identical errors for 1s (count=1)
+RequestError: Error: connect ETIMEDOUT 149.154.167.220:443
+    at new RequestError (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\errors.js:14:15)
+    at plumbing.callback (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\plumbing.js:87:29)
+    at Request.RP$callback [as _callback] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\plumbing.js:46:31)
+    at self.callback (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\@cypress\request\request.js:183:22)
+    at Request.emit (node:events:524:28)
+    at Request.onRequestError (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\@cypress\request\request.js:869:8)
+    at ClientRequest.emit (node:events:524:28)
+    at emitErrorEvent (node:_http_client:104:11)
+    at TLSSocket.socketErrorListener (node:_http_client:518:5)
+    at TLSSocket.emit (node:events:524:28)
+    at emitErrorNT (node:internal/streams/destroy:170:8)
+    at emitErrorCloseNT (node:internal/streams/destroy:129:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+[polling_error] stopped polling; will restart in 1s
+[polling_error] restarted polling after backoff
+[polling_error] EFATAL EFATAL: Error: connect ETIMEDOUT 149.154.167.220:443 ΓÇö suppressing further identical errors for 1s (count=1)
+RequestError: Error: connect ETIMEDOUT 149.154.167.220:443
+    at new RequestError (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\errors.js:14:15)
+    at plumbing.callback (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\plumbing.js:87:29)
+    at Request.RP$callback [as _callback] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\plumbing.js:46:31)
+    at self.callback (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\@cypress\request\request.js:183:22)
+    at Request.emit (node:events:524:28)
+    at Request.onRequestError (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\@cypress\request\request.js:869:8)
+    at ClientRequest.emit (node:events:524:28)
+    at emitErrorEvent (node:_http_client:104:11)
+    at TLSSocket.socketErrorListener (node:_http_client:518:5)
+    at TLSSocket.emit (node:events:524:28)
+    at emitErrorNT (node:internal/streams/destroy:170:8)
+    at emitErrorCloseNT (node:internal/streams/destroy:129:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+[polling_error] stopped polling; will restart in 1s
+[polling_error] restarted polling after backoff
+[polling_error] ETELEGRAM ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running ΓÇö suppressing further identical errors for 1s (count=1)
+Error: ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+    at C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\node-telegram-bot-api\src\telegram.js:316:15
+    at tryCatcher (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\util.js:16:23)
+    at Promise._settlePromiseFromHandler (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:547:31)
+    at Promise._settlePromise (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:604:18)
+    at Promise._settlePromise0 (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:649:10)
+    at Promise._settlePromises (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:729:18)
+    at _drainQueueStep (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:93:12)
+    at _drainQueue (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:86:9)
+    at Async._drainQueues (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:102:5)
+    at Async.drainQueues [as _onImmediate] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:15:14)
+    at process.processImmediate (node:internal/timers:491:21)
+[polling_error] stopped polling; will restart in 1s
+[polling_error] restarted polling after backoff
+[polling_error] ETELEGRAM ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running ΓÇö suppressing further identical errors for 1s (count=1)
+Error: ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+    at C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\node-telegram-bot-api\src\telegram.js:316:15
+    at tryCatcher (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\util.js:16:23)
+    at Promise._settlePromiseFromHandler (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:547:31)
+    at Promise._settlePromise (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:604:18)
+    at Promise._settlePromise0 (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:649:10)
+    at Promise._settlePromises (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:729:18)
+    at _drainQueueStep (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:93:12)
+    at _drainQueue (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:86:9)
+    at Async._drainQueues (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:102:5)
+    at Async.drainQueues [as _onImmediate] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:15:14)
+    at process.processImmediate (node:internal/timers:491:21)
+[polling_error] stopped polling; will restart in 1s
+[polling_error] restarted polling after backoff
+[polling_error] ETELEGRAM ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running ΓÇö suppressing further identical errors for 1s (count=1)
+Error: ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+    at C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\node-telegram-bot-api\src\telegram.js:316:15
+    at tryCatcher (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\util.js:16:23)
+    at Promise._settlePromiseFromHandler (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:547:31)
+    at Promise._settlePromise (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:604:18)
+    at Promise._settlePromise0 (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:649:10)
+    at Promise._settlePromises (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:729:18)
+    at _drainQueueStep (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:93:12)
+    at _drainQueue (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:86:9)
+    at Async._drainQueues (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:102:5)
+    at Async.drainQueues [as _onImmediate] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:15:14)
+    at process.processImmediate (node:internal/timers:491:21)
+[polling_error] stopped polling; will restart in 1s
+[polling_error] restarted polling after backoff
+[polling_error] ETELEGRAM ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running ΓÇö suppressing further identical errors for 1s (count=1)
+Error: ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+    at C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\node-telegram-bot-api\src\telegram.js:316:15
+    at tryCatcher (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\util.js:16:23)
+    at Promise._settlePromiseFromHandler (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:547:31)
+    at Promise._settlePromise (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:604:18)
+    at Promise._settlePromise0 (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:649:10)
+    at Promise._settlePromises (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\promise.js:729:18)
+    at _drainQueueStep (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:93:12)
+    at _drainQueue (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:86:9)
+    at Async._drainQueues (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:102:5)
+    at Async.drainQueues [as _onImmediate] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\bluebird\js\release\async.js:15:14)
+    at process.processImmediate (node:internal/timers:491:21)
+[polling_error] stopped polling; will restart in 1s
+[polling_error] restarted polling after backoff
+[polling_error] EFATAL EFATAL: Error: read ECONNRESET ΓÇö suppressing further identical errors for 1s (count=1)
+RequestError: Error: read ECONNRESET
+    at new RequestError (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\errors.js:14:15)
+    at plumbing.callback (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\plumbing.js:87:29)
+    at Request.RP$callback [as _callback] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\plumbing.js:46:31)
+    at self.callback (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\@cypress\request\request.js:183:22)
+    at Request.emit (node:events:524:28)
+    at Request.onRequestError (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\@cypress\request\request.js:869:8)
+    at ClientRequest.emit (node:events:524:28)
+    at emitErrorEvent (node:_http_client:104:11)
+    at TLSSocket.socketErrorListener (node:_http_client:518:5)
+    at TLSSocket.emit (node:events:524:28)
+    at emitErrorNT (node:internal/streams/destroy:170:8)
+    at emitErrorCloseNT (node:internal/streams/destroy:129:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+[polling_error] stopped polling; will restart in 1s
+[polling_error] EFATAL EFATAL: Error: getaddrinfo ENOTFOUND api.telegram.org ΓÇö suppressing further identical errors for 1s (count=1)
+RequestError: Error: getaddrinfo ENOTFOUND api.telegram.org
+    at new RequestError (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\errors.js:14:15)
+    at plumbing.callback (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\plumbing.js:87:29)
+    at Request.RP$callback [as _callback] (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\request-promise-core\lib\plumbing.js:46:31)
+    at self.callback (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\@cypress\request\request.js:183:22)
+    at Request.emit (node:events:524:28)
+    at Request.onRequestError (C:\Users\cvikt\OneDrive\Desktop\unlimited-bot\node_modules\@cypress\request\request.js:869:8)
+    at ClientRequest.emit (node:events:524:28)
+    at emitErrorEvent (node:_http_client:104:11)
+    at TLSSocket.socketErrorListener (node:_http_client:518:5)
+    at TLSSocket.emit (node:events:524:28)
+    at emitErrorNT (node:internal/streams/destroy:170:8)
+    at emitErrorCloseNT (node:internal/streams/destroy:129:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+[polling_error] restarted polling after backoff
+[polling_error] EFATAL EFATAL: Error: getaddrinfo ENOTFOUND api.telegram.org ΓÇö suppressing further identical errors for 2s (count=2)
+[polling_error] stopped polling; will restart in 2s
+[polling_error] restarted polling after backoff
+[polling_error] EFATAL EFATAL: Error: getaddrinfo ENOTFOUND api.telegram.org ΓÇö suppressing further identical errors for 4s (count=3)
+[polling_error] stopped polling; will restart in 4s
+[polling_error] restarted polling after backoff
+[polling_error] EFATAL EFATAL: Error: getaddrinfo ENOTFOUND api.telegram.org ΓÇö suppressing further identical errors for 8s (count=4)
+[polling_error] stopped polling; will restart in 8s
+[polling_error] restarted polling after backoff
+[polling_error] EFATAL EFATAL: Error: getaddrinfo ENOTFOUND api.telegram.org ΓÇö suppressing further identical errors for 16s (count=5)
+[polling_error] stopped polling; will restart in 16s
+[polling_error] restarted polling after backoff
+[polling_error] EFATAL EFATAL: Error: getaddrinfo ENOTFOUND api.telegram.org ΓÇö suppressing further identical errors for 32s (count=6)
+[polling_error] stopped polling; will restart in 32s
+[polling_error] restarted polling after backoff

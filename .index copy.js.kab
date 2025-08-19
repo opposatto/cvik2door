@@ -1,0 +1,1469 @@
+const TelegramBot = require('node-telegram-bot-api');
+const dotenv = require('dotenv');
+dotenv.config();
+const fs = require('fs');
+const path = require('path');
+
+//const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+//const ADMIN_ID = process.env.ADMIN_ID ? Number(process.env.ADMIN_ID) : null;
+if (!TOKEN) {
+  console.error('Missing TELEGRAM_BOT_TOKEN environment variable');
+  process.exit(1);
+}
+
+// Create bot without starting polling immediately. We'll delete any webhook and
+// then start polling to avoid '409 Conflict: terminated by other getUpdates request'
+const bot = new TelegramBot(TOKEN, { polling: false });
+
+// Polling error suppression/backoff state
+const pollingErrorState = { count: 0, suppressedUntil: 0, lastErrText: null };
+
+// Handle polling errors with exponential backoff logging and stop/start polling to reduce noise
+bot.on('polling_error', (err) => {
+  try {
+    const now = Date.now();
+    const errText = (err && err.message) ? `${err.code || ''} ${err.message}`.trim() : String(err);
+    // If same error recently suppressed, ignore
+    if (pollingErrorState.lastErrText === errText && now < pollingErrorState.suppressedUntil) return;
+    // increment count (reset if different error)
+    if (pollingErrorState.lastErrText !== errText) {
+      pollingErrorState.count = 1;
+      pollingErrorState.lastErrText = errText;
+    } else {
+      pollingErrorState.count++;
+    }
+    // exponential backoff: base 1s, cap 5 minutes
+    const backoffMs = Math.min(5 * 60 * 1000, 1000 * Math.pow(2, Math.max(0, pollingErrorState.count - 1)));
+    pollingErrorState.suppressedUntil = now + backoffMs;
+    console.error(`[polling_error] ${errText} — suppressing further identical errors for ${Math.round(backoffMs/1000)}s (count=${pollingErrorState.count})`);
+    // include stack if available for first occurrence
+    if (pollingErrorState.count === 1 && err && err.stack) console.error(err.stack);
+
+    // stop polling to prevent repeated internal logs, then restart after backoff
+    if (!pollingErrorState.stopped) {
+      try {
+        pollingErrorState.stopped = true;
+        bot.stopPolling && bot.stopPolling();
+        console.warn(`[polling_error] stopped polling; will restart in ${Math.round(backoffMs/1000)}s`);
+      } catch (e) {
+        console.error('Failed to stop polling', e && e.message);
+      }
+      setTimeout(() => {
+        try {
+          bot.startPolling && bot.startPolling();
+          pollingErrorState.stopped = false;
+          console.warn('[polling_error] restarted polling after backoff');
+        } catch (e) {
+          console.error('Failed to restart polling', e && e.message);
+        }
+      }, backoffMs);
+    }
+
+    // schedule a reset of count if no further errors after backoff window
+    setTimeout(() => {
+      if (Date.now() >= pollingErrorState.suppressedUntil) {
+        pollingErrorState.count = 0;
+        pollingErrorState.lastErrText = null;
+      }
+    }, backoffMs + 1000);
+  } catch (e) {
+    // fallback logging
+    console.error('polling_error handler failed', e && e.message);
+  }
+});
+// In-memory stores
+const orders = [];
+const drivers = [];
+const customers = [];
+const sessions = [];
+const qrCodes = [];
+// runtime-only maps
+// sessionTimers: sessionId -> { timeout, interval }
+const sessionTimers = new Map(); // sessionId -> { timeout, interval }
+const adminPendingQR = new Map(); // adminId -> qrId (waiting for media/text)
+const driverApprovalMessages = new Map(); // driverId -> { chatId, messageId }
+const adminTempMessages = new Map(); // messageId -> timeoutId
+const adminSentMessages = new Map(); // messageId -> { orderId?, type }
+
+// Group logging config (logs all messages from a configured group into a separate file)
+const GROUP_LOG_ID = process.env.GROUP_LOG_ID ? Number(process.env.GROUP_LOG_ID) : 4858902645;
+const GROUP_LOG_FILE = path.join(__dirname, `group-${GROUP_LOG_ID}.log`);
+const GROUP_LOG_ROTATE_BYTES = Number(process.env.GROUP_LOG_ROTATE_BYTES || (5 * 1024 * 1024)); // default 5MB
+
+function appendGroupLog(entryObj) {
+  try {
+    const s = JSON.stringify(entryObj) + '\n';
+    // rotate if needed
+    try {
+      if (fs.existsSync(GROUP_LOG_FILE)) {
+        const stats = fs.statSync(GROUP_LOG_FILE);
+  const rotateLimit = (SETTINGS && SETTINGS.groupLogRotateBytes) ? SETTINGS.groupLogRotateBytes : GROUP_LOG_ROTATE_BYTES;
+  if (stats.size + Buffer.byteLength(s, 'utf8') > rotateLimit) {
+          const bak = path.join(__dirname, `group-${GROUP_LOG_ID}-${Date.now()}.log`);
+          fs.renameSync(GROUP_LOG_FILE, bak);
+        }
+      }
+    } catch (e) { /* ignore rotation errors */ }
+    fs.appendFile(GROUP_LOG_FILE, s, () => {});
+  } catch (e) { /* ignore */ }
+}
+
+// Log messages coming from the group into a file for auditing
+bot.on('message', (msg) => {
+  try {
+    if (msg && msg.chat && Number(msg.chat.id) === GROUP_LOG_ID) {
+      const entry = {
+        ts: new Date().toISOString(),
+        message_id: msg.message_id,
+        from: msg.from ? { id: msg.from.id, name: `${msg.from.first_name||''} ${msg.from.last_name||''}`.trim(), username: msg.from.username } : null,
+        text: msg.text || null,
+        has_location: !!msg.location,
+        has_photo: !!msg.photo,
+        raw: { entities: msg.entities || null }
+      };
+      appendGroupLog(entry);
+    }
+  } catch (e) { /* ignore logging errors */ }
+});
+
+const DATA_FILE = path.join(__dirname, 'data.json');
+
+// app-wide settings (persisted)
+let SETTINGS = {
+  groupLogRotateBytes: Number(process.env.GROUP_LOG_ROTATE_BYTES) || (5 * 1024 * 1024),
+  adminTempTTL: 2 * 60 * 1000,
+  archiveDays: 7
+};
+
+let orderCounter = 1;
+// load persisted data (after in-memory arrays exist)
+loadData();
+
+// Simple translations
+const MESSAGES = {
+  en: {
+    welcome: name => `Welcome ${name || 'friend'}!\nUse the inline UI to order or send items as text.`,
+    reg_sent: 'Registration sent to admin for approval.',
+    reg_approved: 'Registration approved! You can now /connect',
+    now_online: 'You are now online 🟢',
+    now_offline: 'You are now offline 🔴',
+    start_live_prompt: 'Please send your live location now (use Telegram location attachment)',
+  no_active_live: 'No active live session. Use START LIVE before sending location.',
+  live_started: (name, until) => `${name} started sharing live location (valid until ${until}).`,
+  live_stopped: name => `${name} stopped sharing live location.`,
+  live_expired: 'Live location session expired.',
+  live_ended: 'Driver live location sharing has ended.',
+  live_shared: (name, until) => `${name} shared live location (valid until ${until}).`,
+  location_saved: 'Location saved to your order.',
+  unsupported_qr_payload: 'Unsupported QR payload — send a photo, document, or text.',
+  payment_received: id => `Thanks — payment received for order #${String(id).padStart(4,'0')}.`,
+  picked_up_notify: id => `Your order #${String(id).padStart(4,'0')} has been picked up. 🚀`,
+  arrived_notify: id => `Hi, your order #${String(id).padStart(4,'0')} has arrived. Please collect your order.`
+  ,
+  marked_paid: 'Marked as PAID',
+  order_not_found: 'Order not found',
+  no_admin: 'No admin set',
+  qr_or_order_not_found: 'QR or order not found',
+  order_no_customer: 'Order has no customer',
+  qr_sent: 'QR sent to customer'
+  },
+  kh: {
+    welcome: name => `សូមស្វាគមន៍ ${name || ''}!\nប្រើ UI ដើម្បីបញ្ជាទិញ ឬផ្ញើររបស់។`,
+    reg_sent: 'ការចុះបញ្ជីបានផ្ញើទៅអ្នកគ្រប់គ្រងសម្រាប់អនុម័ត។',
+    reg_approved: 'បានអនុម័ត! អ្នកឥឡូវអាច /connect',
+    now_online: 'អ្នកត្រូវបានភ្ជាប់ 🟢',
+    now_offline: 'អ្នកបានបិទ🔴',
+    start_live_prompt: 'សូមផ្ញើទីតាំងបច្ចុប្បន្ន (location)',
+  no_active_live: 'មិនមានសន្និសីទផ្តល់ទីតាំង។ សូមចាប់ផ្តើម START LIVE',
+  live_started: (name, until) => `${name} បានចែករំលែកទីតាំង (មានសុពលភាពរហូតដល់ ${until})។`,
+  live_stopped: name => `${name} បានបញ្ឈប់ការចែករំលែកទីតាំង។`,
+  live_expired: 'សន្និសីទផ្ដល់ទីតាំងបានផុតកំណត់។',
+  live_ended: 'ការចែករំលែកទីតាំងរបស់អ្នកបេក្ខភាពបានបញ្ចប់។',
+  live_shared: (name, until) => `${name} បានចែករំលែកទីតាំង (មានសុពលភាពរហូតដល់ ${until})។`,
+  location_saved: 'ទីតាំងត្រូវបានរក្សាទុកទៅក្នុងការបញ្ជាទិញរបស់អ្នក។',
+  unsupported_qr_payload: 'ទ្រង់ទ្រាយ QR មិនគាំទ្រ — សូមផ្ញើរូបថត ឯកសារ ឬអក្សរ។',
+  payment_received: id => `អរគុណ — បានទទួលការទូទាត់សម្រាប់បញ្ជាទិញ #${String(id).padStart(4,'0')}.`,
+  picked_up_notify: id => `បញ្ជាទិញលេខ #${String(id).padStart(4,'0')} ត្រូវបានយក។ 🚀`,
+  arrived_notify: id => `ប្ដូរទំនិញរបស់អ្នក #${String(id).padStart(4,'0')} បានមកដល់។`
+  ,
+  marked_paid: 'បានត្រូវបានកំណត់ជា PAID',
+  order_not_found: 'មិនបានរកឃើញការបញ្ជាទិញ',
+  no_admin: 'មិនមានអ្នកគ្រប់គ្រង',
+  qr_or_order_not_found: 'QR ឬការបញ្ជាទិញមិនជាក់ស្តែង',
+  order_no_customer: 'ការបញ្ជាទិញមិនមានអតិថិជន',
+  qr_sent: 'QR ត្រូវបានផ្ញើទៅអតិថិជន'
+  }
+};
+
+function getUserLang(userId) {
+  const d = drivers.find(x => x.id === userId);
+  if (d && d.lang) return d.lang;
+  const c = customers.find(x => x.id === userId);
+  if (c && c.lang) return c.lang;
+  return 'en';
+}
+
+function tFor(userId, key, ...args) {
+  const lang = getUserLang(userId) || 'en';
+  const m = MESSAGES[lang] && MESSAGES[lang][key];
+  if (!m) return (MESSAGES['en'][key] && MESSAGES['en'][key](...args)) || '';
+  return typeof m === 'function' ? m(...args) : m;
+}
+
+function loadData() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, 'utf8');
+      const obj = JSON.parse(raw);
+      if (obj.orders) { orders.length = 0; Array.prototype.push.apply(orders, obj.orders); }
+      if (obj.drivers) { drivers.length = 0; Array.prototype.push.apply(drivers, obj.drivers); }
+      if (obj.sessions) { sessions.length = 0; Array.prototype.push.apply(sessions, obj.sessions); }
+      if (obj.qrCodes) { qrCodes.length = 0; Array.prototype.push.apply(qrCodes, obj.qrCodes); }
+      if (obj.orderCounter) orderCounter = obj.orderCounter;
+  if (obj.SETTINGS) SETTINGS = Object.assign(SETTINGS, obj.SETTINGS);
+    // schedule any active sessions
+    sessions.forEach(s => { if (!s.ended && s.expiresAt && s.expiresAt > Date.now()) scheduleSessionExpiry(s); });
+      console.log('Loaded data from', DATA_FILE);
+    }
+  } catch (e) {
+    console.error('Failed to load data:', e.message);
+  }
+}
+
+function saveData() {
+  try {
+  const obj = { orders, drivers, customers, sessions, qrCodes, orderCounter, SETTINGS };
+    fs.writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Failed to save data:', e.message);
+  }
+}
+
+function formatOrder(order) {
+  const lines = [];
+  const statusEmoji = order.order_status_emoji || '🆕';
+  const id = String(order.order_id || 0).padStart(4, '0');
+  lines.push(`${statusEmoji} #${id}`);
+  lines.push(`👤 ${order.customer_name || ''}`);
+  lines.push(`📍 ${order.map_link || order.location || ''}`);
+  const total = typeof order.total_amount === 'number' ? `${order.total_amount.toFixed(2)}` : '';
+  const paid = order.paid_status ? ` ${order.paid_status}` : '';
+  const pm = order.payment_method ? ` by ${order.payment_method}` : '';
+  lines.push(`💲 ${total}${paid}${pm}`.trim());
+  if (order.payment_method === 'CASH') {
+    lines.push(`💰 ${order.given_cash || ''}`);
+    lines.push(`💱 ${typeof order.change_cash !== 'undefined' ? order.change_cash : ''}`);
+  }
+  const driverEmoji = order.driver_assigned ? (order.driver_status === 'busy' ? '🟡' : (order.driver_status === 'assigned' ? '🔵' : '🚀')) : '🚀';
+  lines.push(`${driverEmoji} ${order.driver_name || ''}`);
+  lines.push(`📃 ${order.items || ''}`);
+  if (order.feedback) lines.push(`⭐ ${order.feedback}`);
+  lines.push(`📅 ${order.date_time_stamp || ''}`);
+  return lines.join('\n');
+}
+
+// Utilities: haversine distance in meters and simple ETA estimator
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  function toRad(v) { return v * Math.PI / 180; }
+  const R = 6371000; // meters
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+function estimateETASeconds(distanceMeters, speedKmph = 30) {
+  // speed in km/h -> m/s
+  const speedMs = (speedKmph * 1000) / 3600;
+  if (!speedMs || speedMs <= 0) return null;
+  return Math.round(distanceMeters / speedMs);
+}
+
+// No external routing by default; drivers get a Google Maps directions link and a simple ETA estimate using haversine distance.
+
+function createOrder(data = {}) {
+  const order = Object.assign({
+    order_id: orderCounter++,
+    order_status: 'new',
+    order_status_emoji: '🆕',
+    customer_name: '',
+    customer_id: null,
+    map_link: '',
+    total_amount: 0,
+    paid_status: '',
+    payment_method: '',
+  given_cash: null,
+  change_cash: null,
+    driver_name: '',
+    driver_assigned: false,
+    driver_status: null,
+    items: '',
+    feedback: null,
+    date_time_stamp: new Date().toISOString()
+  }, data);
+  orders.push(order);
+  saveData();
+  return order;
+}
+
+// send a temporary admin message (auto-delete after ttl ms)
+async function sendAdminTempMessage(text, opts = {}, ttl = 2 * 60 * 1000) {
+  if (!ADMIN_ID) return null;
+  try {
+    const res = await bot.sendMessage(ADMIN_ID, text, opts);
+    const mid = res.message_id;
+    const to = setTimeout(async () => {
+      try { await bot.deleteMessage(ADMIN_ID, mid); } catch (e) { }
+      adminTempMessages.delete(mid);
+    }, ttl);
+    adminTempMessages.set(mid, to);
+    return res;
+  } catch (e) { console.error('sendAdminTempMessage failed', e && e.message); return null; }
+}
+
+async function notifyAdmin(text, opts = {}) {
+  if (!ADMIN_ID) return console.log('No ADMIN_ID set — would send to admin:', text);
+  const ttl = (SETTINGS && SETTINGS.adminTempTTL) ? SETTINGS.adminTempTTL : (2 * 60 * 1000);
+  // Try a temporary (auto-deleting) admin message first. If that fails (for example
+  // because the bot can't delete messages in the admin chat), fall back to a
+  // persistent send so admin still receives the notification.
+  try {
+    const res = await sendAdminTempMessage(text, opts, ttl);
+    if (res) return res;
+  } catch (e) {
+    console.error('notifyAdmin temp send failed:', e && e.message);
+  }
+  // persistent fallback
+  try { return await bot.sendMessage(ADMIN_ID, text, opts); } catch (e) { console.error('notifyAdmin persistent send failed', e && e.message); }
+}
+
+// driver keyboards (plain labels: CONNECT / LOGOUT)
+const driverOfflineKeyboard = { reply_markup: { keyboard: [[{ text: 'CONNECT' }], [{ text: '📊STATS' }, { text: '⚙️SETTINGS' }]], resize_keyboard: true } };
+const driverOnlineKeyboard = { reply_markup: { keyboard: [[{ text: 'LOGOUT' }, { text: '📦MY ORDERS' }], [{ text: '📊STATS' }, { text: '⚙️SETTINGS' }]], resize_keyboard: true } };
+
+// Keyboards
+const adminMainKeyboard = {
+  reply_markup: {
+    keyboard: [[{ text: '📥ORDERS' }, { text: '⚡ACTIVE' }, { text: '✅COMPLETED' }], [{ text: '📊STATS' }, { text: '⚙️SETTINGS' }]],
+    resize_keyboard: true
+  }
+}
+// Admin helpers: list orders by section
+function ordersBySection(section) {
+  if (section === 'ORDERS') return orders.filter(o => ['new', 'new_draft_order', 'new_forwarded_order', 'new_online_order', 'new'].includes(o.order_status));
+  if (section === 'ACTIVE') return orders.filter(o => ['assigned', 'pickedup', 'arrived'].includes(o.order_status));
+  if (section === 'COMPLETED') return orders.filter(o => ['completed', 'cancelled', 'archived'].includes(o.order_status));
+  return [];
+}
+
+async function sendOrdersListToAdmin(section) {
+    saveData();
+  const list = ordersBySection(section);
+  if (!ADMIN_ID) return;
+  // clear any small temp messages to keep interface tidy
+  clearAdminTempMessages();
+  if (list.length === 0) return bot.sendMessage(ADMIN_ID, `${section}: (no orders)`);
+  const buttons = list.map(o => [{ text: `${o.order_status_emoji || '🆕'} #${String(o.order_id).padStart(4,'0')} for ${o.customer_name || ''}`, callback_data: `open:${o.order_id}:admin` }]);
+  return bot.sendMessage(ADMIN_ID, `${section} — ${list.length} orders`, { reply_markup: { inline_keyboard: buttons } });
+}
+
+async function sendOrderDetailsToAdmin(orderId, editMode = true, chatId = null) {
+  const ord = orders.find(o => o.order_id === Number(orderId));
+  if (!ord) return;
+  const text = formatOrder(ord);
+  const targetChat = chatId || ADMIN_ID;
+  const inline = [];
+  if (editMode) {
+    // edit keyboard as inline for admin actions
+  inline.push([{ text: 'CASH', callback_data: `setpay:CASH:${ord.order_id}` }, { text: 'QR', callback_data: `setpay:QR:${ord.order_id}` }, { text: 'PAID', callback_data: `setpaid:${ord.order_id}` }, { text: `💲 ${ord.total_amount || 0}`, callback_data: `settotal:${ord.order_id}` }]);
+  // allow admin to send a QR to the customer when QR payment selected
+  inline.push([{ text: '📤 Send QR', callback_data: `sendqr:${ord.order_id}` }]);
+    inline.push([{ text: '⚡Go', callback_data: `go:${ord.order_id}` }, { text: '❌ Cancel', callback_data: `cancel:${ord.order_id}` }, { text: '⬅️ Go back', callback_data: `back:menu` }]);
+  } else {
+    inline.push([{ text: '↩️ Go back', callback_data: `back:menu` }]);
+  }
+  return bot.sendMessage(targetChat, text, { reply_markup: { inline_keyboard: inline } });
+}
+    saveData();
+
+function clearAdminTempMessages() {
+  for (const [mid, to] of adminTempMessages.entries()) {
+    try { clearTimeout(to); bot.deleteMessage(ADMIN_ID, mid).catch(()=>{}); } catch(e){}
+  }
+  adminTempMessages.clear();
+}
+
+// Driver helpers
+function findAvailableDriver() {
+  return drivers.find(d => d.status === 'online');
+}
+
+async function sendOrderToDriver(order, driver) {
+  if (!driver) return;
+  const text = `Order for you:\n${formatOrder(order)}`;
+  const readyKeyboard = { reply_markup: { inline_keyboard: [[{ text: '🛍️ PICKUP', callback_data: `driver_pickup:${order.order_id}` }, { text: '🛣️ROUTE', callback_data: `driver_route:${order.order_id}` }], [{ text: '📡 START LIVE', callback_data: `driver_start_live:${order.order_id}` }, { text: '⛔ STOP LIVE', callback_data: `driver_stop_live:${order.order_id}` }]] } };
+  try {
+    await bot.sendMessage(driver.id, text, readyKeyboard);
+  } catch (e) {
+    console.error('Failed send to driver', e.message);
+  }
+}
+
+// Live-location session helpers
+function startLiveSession(driverId, orderId) {
+  // stop existing session for this driver
+  const existing = sessions.find(s => s.driverId === driverId && !s.ended);
+  if (existing) existing.ended = true;
+  const session = { id: `${driverId}:${orderId}:${Date.now()}`, driverId, orderId, startedAt: Date.now(), ended: false, expiresAt: Date.now() + 30 * 60 * 1000, lastLocation: null };
+  sessions.push(session);
+  saveData();
+  // schedule expiry
+  scheduleSessionExpiry(session);
+  scheduleSessionInterval(session);
+  return session;
+}
+
+function stopLiveSession(driverId, orderId) {
+  const s = sessions.find(ss => ss.driverId === driverId && ss.orderId === orderId && !ss.ended);
+  if (s) { s.ended = true; s.endedAt = Date.now(); saveData(); }
+  // cancel timer if present
+  if (s) cancelSessionTimer(s.id);
+  return s;
+}
+
+function scheduleSessionExpiry(session) {
+  try {
+    // cancel existing if any
+    // keep existing interval running; only update/replace timeout
+    const existing = sessionTimers.get(session.id) || {};
+    if (existing.timeout) clearTimeout(existing.timeout);
+    const ms = Math.max(0, (session.expiresAt || (Date.now() + 30*60*1000)) - Date.now());
+    const t = setTimeout(async () => {
+      session.ended = true;
+      session.endedAt = Date.now();
+      saveData();
+      // notify driver and customer
+      const drv = drivers.find(d => d.id === session.driverId);
+      const ord = orders.find(o => o.order_id === session.orderId);
+  try { if (drv) await bot.sendMessage(drv.id, tFor(drv.id, 'live_expired')); } catch(e){}
+  try { if (ord && ord.customer_id) await bot.sendMessage(ord.customer_id, tFor(ord.customer_id, 'live_ended')); } catch(e){}
+      // clear interval as well
+      const cur = sessionTimers.get(session.id);
+      if (cur && cur.interval) { clearInterval(cur.interval); }
+      sessionTimers.delete(session.id);
+    }, ms);
+    existing.timeout = t;
+    sessionTimers.set(session.id, existing);
+  } catch (e) { console.error('scheduleSessionExpiry', e.message); }
+}
+
+function scheduleSessionInterval(session) {
+  try {
+    const existing = sessionTimers.get(session.id) || {};
+    if (existing.interval) clearInterval(existing.interval);
+    // every 15s forward last known location (if any) to customer while session active
+    const iv = setInterval(async () => {
+      try {
+        if (session.ended) { clearInterval(iv); return; }
+        if (!session.lastLocation) return;
+        const ord = orders.find(o => o.order_id === session.orderId);
+        if (ord && ord.customer_id) {
+          await bot.sendLocation(ord.customer_id, session.lastLocation.latitude, session.lastLocation.longitude);
+        }
+      } catch (e) { /* ignore transient errors */ }
+    }, 15 * 1000);
+    existing.interval = iv;
+    sessionTimers.set(session.id, existing);
+  } catch (e) { console.error('scheduleSessionInterval', e.message); }
+}
+
+function cancelSessionTimer(sessionId) {
+  const entry = sessionTimers.get(sessionId);
+  if (entry) {
+    if (entry.timeout) clearTimeout(entry.timeout);
+    if (entry.interval) clearInterval(entry.interval);
+    sessionTimers.delete(sessionId);
+  }
+}
+
+function getActiveSessionForDriver(driverId) {
+  const now = Date.now();
+  const s = sessions.find(ss => ss.driverId === driverId && !ss.ended && ss.expiresAt > now);
+  return s;
+}
+
+// Admin menu trigger
+bot.on('message', async (msg) => {
+  if (!msg.text) return; // handled earlier for /start etc
+  const text = msg.text.trim();
+    saveData();
+  if (msg.chat.id === ADMIN_ID) {
+    if (text === '📥ORDERS') {
+      await sendOrdersListToAdmin('ORDERS');
+      return;
+    }
+    if (text === '⚡ACTIVE') {
+      await sendOrdersListToAdmin('ACTIVE');
+      return;
+    }
+    if (text === '✅COMPLETED') {
+      await sendOrdersListToAdmin('COMPLETED');
+      return;
+    }
+    // handle simple numeric edits: if admin sends a message while an order is in edit mode we append or set values
+    // Detect $amount update
+    if (text.startsWith('$')) {
+      const val = parseFloat(text.replace('$', '').trim());
+      // find last order in edit state (simple heuristic)
+      const last = orders.slice().reverse().find(o => o._editingBy === ADMIN_ID);
+      if (last) {
+        last.total_amount = isNaN(val) ? last.total_amount : val;
+        await bot.sendMessage(ADMIN_ID, `Total updated: ${last.total_amount}`);
+        return;
+      }
+    }
+    // If admin forwards a location or contact - treat accordingly (handled via other events)
+    // If admin forwarded a message from the public group, create a new order using original sender as customer
+    // detect forwarded message from configured group
+    const fchat = msg.forward_from_chat;
+    const fromUser = msg.forward_from;
+    if ((fchat && Number(fchat.id) === GROUP_LOG_ID) || (fromUser && msg.forward_from_chat && Number(msg.forward_from_chat.id) === GROUP_LOG_ID)) {
+      // special case: forwarded from group
+      let customerId = null;
+      let customerName = '(unknown)';
+      if (fromUser && fromUser.id) {
+        customerId = fromUser.id;
+        customerName = `${fromUser.first_name || ''} ${fromUser.last_name || ''}`.trim();
+      } else if (msg.forward_sender_name) {
+        customerName = msg.forward_sender_name;
+      }
+  let mapLink = '';
+  if (msg.location) mapLink = `location:${msg.location.latitude},${msg.location.longitude}`;
+  else mapLink = (msg.text && msg.text.includes('http')) ? msg.text : (msg.caption || '');
+      const items = msg.caption || msg.text || '(forwarded message)';
+      const order = createOrder({ customer_name: customerName, customer_id: customerId, map_link: mapLink, items });
+      // send admin a persistent notification about new order with quick GO button (we track it so it won't be mass-cleared)
+      const kb = { reply_markup: { inline_keyboard: [[{ text: '⚡ GO', callback_data: `go:${order.order_id}` }, { text: '❌ Cancel', callback_data: `cancel:${order.order_id}` }]] } };
+      try {
+        const sent = await bot.sendMessage(ADMIN_ID, `Forwarded order created #${String(order.order_id).padStart(4,'0')} from ${customerName}\nItems: ${items}`, kb);
+        // track this admin-sent message so we don't clear it accidentally; associate with order
+        if (sent && sent.message_id) adminSentMessages.set(sent.message_id, { orderId: order.order_id, type: 'new_order' });
+      } catch (e) { await notifyAdmin(`Forwarded order created #${String(order.order_id).padStart(4,'0')} from ${customerName}`, kb); }
+      // prompt admin to assign a customer if id missing
+      if (!order.customer_id) {
+        order._editingBy = ADMIN_ID; order._editField = 'assign_customer';
+        saveData();
+        await bot.sendMessage(ADMIN_ID, `Order #${String(order.order_id).padStart(4,'0')} has no customer id. Reply with a contact or send /setcustomer <user_id> or /setcustomer @username`);
+      }
+      return;
+    }
+  }
+
+  // Admin quick text commands
+  if (msg.chat && msg.chat.id === ADMIN_ID && text === '⚙️SETTINGS') {
+  const kb = { reply_markup: { inline_keyboard: [[{ text: 'Manage QR', callback_data: 'settings:qr' }, { text: 'Back', callback_data: 'back:menu' }], [{ text: `Rotate ${Math.round(SETTINGS.groupLogRotateBytes/1024)}KB`, callback_data: 'settings:rotate' }, { text: `TTL ${Math.round(SETTINGS.adminTempTTL/1000)}s`, callback_data: 'settings:ttl' }], [{ text: `Archive ${SETTINGS.archiveDays}d`, callback_data: 'settings:archive' }]] } };
+  await bot.sendMessage(ADMIN_ID, 'Settings', kb);
+    return;
+  }
+});
+
+// Handlers
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  const from = msg.from || {};
+  // register customer
+  if (!customers.find(c => c.id === from.id)) {
+    customers.push({ id: from.id, name: `${from.first_name || ''} ${from.last_name || ''}`.trim(), username: from.username });
+  }
+  await bot.sendMessage(chatId, tFor(from.id, 'welcome', from.first_name || 'friend'), { reply_markup: { remove_keyboard: true } });
+  if (chatId === ADMIN_ID) {
+    // clear short-lived temp messages
+    clearAdminTempMessages();
+    // attempt to delete up to 2 recent persistent admin-sent messages we tracked
+    try {
+      const keys = Array.from(adminSentMessages.keys());
+      const lastTwo = keys.slice(Math.max(0, keys.length - 2));
+      for (const mid of lastTwo) {
+        try { await bot.deleteMessage(ADMIN_ID, Number(mid)); } catch (e) { /* ignore deletion errors */ }
+        adminSentMessages.delete(mid);
+      }
+    } catch (e) {
+      console.error('Failed deleting adminSentMessages on /start', e && e.message);
+    }
+    await bot.sendMessage(ADMIN_ID, 'Admin menu', adminMainKeyboard);
+  }
+});
+
+bot.onText(/\/register/, async (msg) => {
+  const from = msg.from || {};
+  if (!drivers.find(d => d.id === from.id)) {
+    drivers.push({ id: from.id, name: `${from.first_name || ''} ${from.last_name || ''}`.trim(), username: from.username, status: 'pending' });
+  }
+  await bot.sendMessage(from.id, tFor(from.id, 'reg_sent'));
+  const buttons = { reply_markup: { inline_keyboard: [[{ text: '✅ Approve', callback_data: `drv_approve:${from.id}` }, { text: '❌ Reject', callback_data: `drv_reject:${from.id}` }]] } };
+  const sent = await notifyAdmin(`NEW DRIVER ${from.first_name || ''} wants to join.`, buttons);
+  // store pending admin message so we can delete it when handled
+  if (sent && sent.message_id) {
+    driverApprovalMessages.set(String(from.id), { chatId: sent.chat.id || ADMIN_ID, messageId: sent.message_id });
+  }
+  saveData();
+});
+
+bot.onText(/\/create_sample_order/, async (msg) => {
+  const order = createOrder({ customer_name: msg.from.first_name || '', customer_id: msg.from.id });
+  await bot.sendMessage(msg.chat.id, 'Sample order created. Notifying admin...');
+  await notifyAdmin(formatOrder(order), { reply_markup: { inline_keyboard: [[{ text: '⚡ GO', callback_data: `go:${order.order_id}` }]] } });
+});
+
+// Admin: set a setting manually: /setsetting key value
+bot.onText(/\/setsetting (\S+) (\d+)/, async (msg, match) => {
+  if (!msg.chat || msg.chat.id !== ADMIN_ID) return;
+  const key = match[1];
+  const value = Number(match[2]);
+  if (!key || isNaN(value)) return bot.sendMessage(ADMIN_ID, 'Usage: /setsetting <key> <numeric_value>');
+  SETTINGS[key] = value;
+  saveData();
+  await bot.sendMessage(ADMIN_ID, `Setting ${key} set to ${value}`);
+});
+
+// Admin utility: fetch a message from the group and show it to admin (usage: /fetchmsg <message_id>)
+bot.onText(/\/fetchmsg (\d+)/, async (msg, match) => {
+  if (!msg.chat || msg.chat.id !== ADMIN_ID) return;
+  const mid = Number(match[1]);
+  try {
+    // try to forward the message from group to admin so admin can see it
+    await bot.forwardMessage(ADMIN_ID, GROUP_LOG_ID, mid);
+    await bot.sendMessage(ADMIN_ID, `Forwarded message ${mid} from group ${GROUP_LOG_ID}`);
+  } catch (e) {
+    await bot.sendMessage(ADMIN_ID, `Failed to fetch message ${mid}: ${e.message}`);
+  }
+});
+
+// Clear admin temp UI (delete temp messages and re-show main keyboard)
+bot.onText(/\/clear_admin_ui/, async (msg) => {
+  if (!msg.chat || msg.chat.id !== ADMIN_ID) return;
+  clearAdminTempMessages();
+  await bot.sendMessage(ADMIN_ID, 'Admin menu', adminMainKeyboard);
+});
+
+// Archive command: prompt admin in the group to approve archiving (and log it)
+bot.onText(/\/copilot_archive(?:\s+(\d+))?/, async (msg, match) => {
+  if (!msg.chat || msg.chat.id !== ADMIN_ID) return;
+  // optional order id argument
+  const id = match && match[1] ? Number(match[1]) : null;
+  const text = id ? `Request to archive order #${String(id).padStart(4,'0')}` : 'Request to archive old orders';
+  try {
+    // send message to group and tag admin for approval
+    const sent = await bot.sendMessage(GROUP_LOG_ID, `${text}
+@${msg.from.username || msg.from.first_name || 'admin'} requests archive. Approve?`, { reply_markup: { inline_keyboard: [[{ text: '✅ Approve', callback_data: `archive_approve:${id||0}` }, { text: '❌ Reject', callback_data: `archive_reject:${id||0}` }]] } });
+    appendGroupLog({ ts: new Date().toISOString(), action: 'archive_prompt', group_message_id: sent.message_id, admin: msg.from.id, orderId: id });
+    await bot.sendMessage(ADMIN_ID, `Archive prompt posted to group (msg ${sent.message_id})`);
+  } catch (e) {
+    await bot.sendMessage(ADMIN_ID, `Failed to post archive prompt to group: ${e.message}`);
+  }
+});
+
+bot.onText(/\/en/, async (msg) => {
+  const u = msg.from || {};
+  const drv = drivers.find(d => d.id === u.id);
+  if (drv) drv.lang = 'en';
+  const c = customers.find(cu => cu.id === u.id);
+  if (c) c.lang = 'en';
+  saveData();
+  await bot.sendMessage(u.id, 'Language set to English');
+});
+
+// Admin: set customer for the order in assign_customer mode or by specifying order id
+bot.onText(/\/setcustomer (.+)/, async (msg, match) => {
+  if (!msg.chat || msg.chat.id !== ADMIN_ID) return;
+  const val = (match && match[1]) ? match[1].trim() : null;
+  if (!val) return bot.sendMessage(ADMIN_ID, 'Usage: /setcustomer <user_id|@username>');
+  // find last order waiting for assignment
+  const ord = orders.slice().reverse().find(o => o._editingBy === ADMIN_ID && o._editField === 'assign_customer');
+  if (!ord) return bot.sendMessage(ADMIN_ID, 'No order is waiting for customer assignment.');
+  let userId = null;
+  if (val.startsWith('@')) {
+    // try find by username in customers/drivers
+    const name = val.replace('@', '');
+    const foundCust = customers.find(c => c.username === name);
+    if (foundCust) userId = foundCust.id;
+    const foundDrv = drivers.find(d => d.username === name);
+    if (!userId && foundDrv) userId = foundDrv.id;
+    if (!userId) return bot.sendMessage(ADMIN_ID, `Username ${val} not found in known users.`);
+  } else {
+    userId = Number(val);
+    if (isNaN(userId)) return bot.sendMessage(ADMIN_ID, 'Invalid id');
+  }
+  ord.customer_id = userId;
+  ord._editingBy = null; ord._editField = null;
+  saveData();
+  await bot.sendMessage(ADMIN_ID, `Order #${String(ord.order_id).padStart(4,'0')} assigned to user ${userId}`);
+});
+
+bot.onText(/\/kh/, async (msg) => {
+  const u = msg.from || {};
+  const drv = drivers.find(d => d.id === u.id);
+  if (drv) drv.lang = 'kh';
+  const c = customers.find(cu => cu.id === u.id);
+  if (c) c.lang = 'kh';
+  saveData();
+  await bot.sendMessage(u.id, 'ភាសាត្រូវបានផ្លាស់ប្តូរទៅខ្មែរ');
+});
+
+// Generic text handler for adding items or handling customer flows
+bot.on('message', async (msg) => {
+  if (msg.text && msg.text.startsWith('/')) return; // command handled elsewhere
+  saveData();
+  const from = msg.from || {};
+  // Support driver keyboard plain-text buttons (CONNECT / LOGOUT / MY ORDERS / STATS / SETTINGS)
+  try {
+    if (msg.text) {
+      const t = msg.text.trim();
+      const drv = drivers.find(d => d.id === from.id);
+      if (drv) {
+        if (t === 'CONNECT') {
+          drv.status = 'online';
+          try { await bot.sendMessage(msg.chat.id, tFor(from.id, 'now_online'), driverOnlineKeyboard); } catch (e) {}
+          await notifyAdmin(`Driver ${drv.name || drv.id} connected`);
+          saveData();
+          return;
+        }
+        if (t === 'LOGOUT') {
+          drv.status = 'offline';
+          try { await bot.sendMessage(msg.chat.id, tFor(from.id, 'now_offline'), driverOfflineKeyboard); } catch (e) {}
+          await notifyAdmin(`Driver ${drv.name || drv.id} disconnected`);
+          saveData();
+          return;
+        }
+        if (t === '📦MY ORDERS' || t.toLowerCase() === 'my orders') {
+          // simple list of assigned orders for driver
+          const my = orders.filter(o => o.driver_id === drv.id && ['assigned','pickedup','arrived'].includes(o.order_status));
+          if (my.length === 0) await bot.sendMessage(drv.id, 'No active orders');
+          else await bot.sendMessage(drv.id, my.map(o => `#${String(o.order_id).padStart(4,'0')} — ${o.order_status}`).join('\n'));
+          return;
+        }
+        if (t === '📊STATS' || t.toLowerCase() === 'stats') {
+          // lightweight stats
+          const completed = orders.filter(o => o.driver_id === drv.id && o.order_status === 'completed').length;
+          const active = orders.filter(o => o.driver_id === drv.id && ['assigned','pickedup','arrived'].includes(o.order_status)).length;
+          await bot.sendMessage(drv.id, `Stats: ${completed} completed, ${active} active`);
+          return;
+        }
+        if (t === '⚙️SETTINGS' || t.toLowerCase() === 'settings') {
+          await bot.sendMessage(drv.id, 'Driver settings (none configured)');
+          return;
+        }
+      }
+    }
+  } catch (e) { console.error('driver keyboard handler error', e && e.message); }
+  // If message contains location we update the latest order for this customer
+  if (msg.location) {
+    // if this user is a driver with active order, forward to customer
+    const drv = drivers.find(d => d.id === from.id);
+    if (drv) {
+      // find active order assigned to this driver
+      const ord = orders.find(o => o.driver_id === drv.id && ['assigned', 'pickedup', 'arrived'].includes(o.order_status));
+      if (ord && ord.customer_id) {
+        // expire sessions
+        sessions.forEach(s => { if (!s.ended && s.expiresAt && s.expiresAt < Date.now()) s.ended = true; });
+        const active = getActiveSessionForDriver(drv.id);
+        if (active) {
+          // update last known location
+          active.lastLocation = { latitude: msg.location.latitude, longitude: msg.location.longitude };
+          // reschedule expiry (extend window slightly on activity)
+          active.expiresAt = Date.now() + 30 * 60 * 1000;
+          scheduleSessionExpiry(active);
+          scheduleSessionInterval(active);
+          try {
+            await bot.sendLocation(ord.customer_id, msg.location.latitude, msg.location.longitude);
+            await bot.sendMessage(ord.customer_id, `${drv.name} shared live location (valid until ${new Date(active.expiresAt).toLocaleTimeString()}).`);
+          } catch (e) { console.error('Failed forward driver location', e.message); }
+          // check for auto-arrival (if order has map_link coordinates)
+          if (ord.map_link && ord.map_link.startsWith('location:')) {
+            const parts = ord.map_link.replace('location:', '').split(',');
+            const lat = parseFloat(parts[0]);
+            const lon = parseFloat(parts[1]);
+            const dist = haversineMeters(msg.location.latitude, msg.location.longitude, lat, lon);
+            if (dist <= 40 && ord.order_status !== 'arrived' && ord.order_status !== 'completed') {
+              ord.order_status = 'arrived'; ord.order_status_emoji = '🏁';
+              saveData();
+              try { await bot.sendMessage(ord.customer_id, tFor(drv.id, 'arrived_notify', ord.order_id)); } catch(e){}
+              try { await bot.sendMessage(drv.id, `Auto-marked order #${String(ord.order_id).padStart(4,'0')} as arrived (within ${Math.round(dist)}m).`); } catch(e){}
+              await notifyAdmin(`Order #${String(ord.order_id).padStart(4,'0')} auto-arrived (driver within ${Math.round(dist)}m).`);
+            }
+          }
+        } else {
+          // no active session — ignore or notify driver
+          try { await bot.sendMessage(drv.id, tFor(drv.id, 'no_active_live')); } catch (e) {}
+        }
+        saveData();
+      }
+      return;
+    }
+
+    const ordCust = orders.slice().reverse().find(o => o.customer_id === from.id && o.order_status === 'new');
+    if (ordCust) {
+    ordCust.map_link = `location: ${msg.location.latitude},${msg.location.longitude}`;
+  saveData();
+    await bot.sendMessage(msg.chat.id, tFor(msg.from.id, 'location_saved'));
+    }
+    return;
+  }
+
+  // If admin sent a $amount to update order in edit mode
+  if (msg.chat && msg.chat.id === ADMIN_ID && msg.text && msg.text.startsWith('$')) {
+    const val = parseFloat(msg.text.replace('$', '').trim());
+    const last = orders.slice().reverse().find(o => o._editingBy === ADMIN_ID);
+    if (last && last._editField) {
+      if (last._editField === 'total_amount') {
+        last.total_amount = isNaN(val) ? last.total_amount : val;
+        last._editingBy = null; last._editField = null;
+        await bot.sendMessage(ADMIN_ID, `Total updated: ${last.total_amount}`);
+        await sendOrderDetailsToAdmin(last.order_id, true, ADMIN_ID);
+        return;
+      }
+      if (last._editField === 'given_cash') {
+        last.given_cash = isNaN(val) ? last.given_cash : val;
+        last.change_cash = (typeof last.total_amount === 'number' && !isNaN(last.given_cash)) ? (last.given_cash - last.total_amount) : null;
+        last._editingBy = null; last._editField = null;
+    saveData();
+        await bot.sendMessage(ADMIN_ID, `Given cash set: ${last.given_cash} — change: ${last.change_cash}`);
+        await sendOrderDetailsToAdmin(last.order_id, true, ADMIN_ID);
+        return;
+      }
+    }
+  }
+
+  // Append text to items for customer's new order
+  const ord = orders.slice().reverse().find(o => o.customer_id === from.id && o.order_status === 'new');
+  if (ord) {
+    ord.items = (ord.items || '') + '\n' + (msg.text || '');
+    await bot.sendMessage(msg.chat.id, 'Added to order items.');
+    return;
+  }
+
+  // If admin forwarded a contact to set customer for order in edit
+  if (msg.contact && msg.chat && msg.chat.id === ADMIN_ID) {
+    const last = orders.slice().reverse().find(o => o._editingBy === ADMIN_ID);
+    if (last) {
+      last.customer_name = `${msg.contact.first_name || ''} ${msg.contact.last_name || ''}`.trim();
+      last.customer_id = msg.contact.user_id || null;
+      last._editingBy = null; last._editField = null;
+      await bot.sendMessage(ADMIN_ID, `Customer updated for order #${String(last.order_id).padStart(4,'0')}`);
+      await sendOrderDetailsToAdmin(last.order_id, true, ADMIN_ID);
+      return;
+    }
+  }
+
+  // If admin was prompted to upload a QR (photo or text)
+  if (msg.chat && msg.chat.id === ADMIN_ID && adminPendingQR.has(ADMIN_ID)) {
+    const qid = adminPendingQR.get(ADMIN_ID);
+    const q = qrCodes.find(x => String(x.id) === String(qid));
+    if (q) {
+      if (msg.photo && msg.photo.length) {
+        // highest quality photo
+        const photo = msg.photo[msg.photo.length - 1];
+        q.media = { type: 'photo', file_id: photo.file_id };
+        await bot.sendMessage(ADMIN_ID, `QR image saved for ${q.code}`);
+      } else if (msg.text) {
+        q.media = { type: 'text', text: msg.text };
+        await bot.sendMessage(ADMIN_ID, `QR text saved for ${q.code}`);
+      } else if (msg.document) {
+        q.media = { type: 'document', file_id: msg.document.file_id, name: msg.document.file_name };
+        await bot.sendMessage(ADMIN_ID, `QR document saved for ${q.code}`);
+      } else {
+        await bot.sendMessage(ADMIN_ID, tFor(ADMIN_ID, 'unsupported_qr_payload'));
+      }
+      saveData();
+    }
+    adminPendingQR.delete(ADMIN_ID);
+    return;
+  }
+
+  // Customer may send QR proof (photo/document or text). Try to match existing QR entries
+  if (msg.chat && msg.chat.type === 'private' && msg.from) {
+    const fromId = msg.from.id;
+    // find orders for this customer awaiting QR payment
+    const ord = orders.slice().reverse().find(o => o.customer_id === fromId && o.payment_method === 'QR' && o.paid_status !== 'PAID');
+    if (ord) {
+      let matched = null;
+      // check photo
+      if (msg.photo && msg.photo.length) {
+        const photo = msg.photo[msg.photo.length - 1];
+        matched = qrCodes.find(q => q.media && q.media.type === 'photo' && q.media.file_id === photo.file_id);
+      }
+      // check document
+      if (!matched && msg.document) {
+        matched = qrCodes.find(q => q.media && q.media.type === 'document' && q.media.file_id === msg.document.file_id);
+      }
+      // check text
+      if (!matched && msg.text) {
+        matched = qrCodes.find(q => (q.media && q.media.type === 'text' && q.media.text && msg.text.includes(q.media.text)) || (msg.text.includes(q.code)) );
+      }
+      if (matched) {
+        // mark paid
+        ord.paid_status = 'PAID';
+        ord.payment_method = 'QR';
+        saveData();
+        await bot.sendMessage(fromId, `Thanks — payment received for order #${String(ord.order_id).padStart(4,'0')}.`);
+        if (ord.driver_id) {
+          try { await bot.sendMessage(ord.driver_id, `Order #${String(ord.order_id).padStart(4,'0')} marked PAID by customer.`); } catch (e) {}
+        }
+        await notifyAdmin(`Order #${String(ord.order_id).padStart(4,'0')} paid via QR by ${ord.customer_name || fromId}`);
+        return;
+      }
+    }
+  }
+});
+
+// Callback queries (inline buttons)
+bot.on('callback_query', async (cb) => {
+  const data = cb.data || '';
+  const from = cb.from || {};
+  // send to driver (go)
+  if (data.startsWith('go:')) {
+    const id = Number(data.split(':')[1]);
+    const ord = orders.find(o => o.order_id === id);
+    if (ord) {
+      ord.order_status = 'assigned'; ord.order_status_emoji = '🛍️'; ord.driver_assigned = true;
+      // auto-assign first available driver
+      const driver = findAvailableDriver();
+      if (driver) {
+        ord.driver_name = driver.name; ord.driver_status = 'assigned'; ord.driver_id = driver.id;
+        await sendOrderToDriver(ord, driver);
+        await bot.answerCallbackQuery(cb.id, { text: `Order assigned to ${driver.name}` });
+        await notifyAdmin(`Order #${String(id).padStart(4,'0')} assigned to ${driver.name}`);
+          // remove admin-persistent messages related to this order (they no longer need to be kept)
+          for (const [mid, meta] of adminSentMessages.entries()) {
+            if (meta && meta.orderId === ord.order_id) {
+              try { await bot.deleteMessage(ADMIN_ID, Number(mid)); } catch (e) { }
+              adminSentMessages.delete(mid);
+            }
+          }
+      } else {
+        ord.driver_name = '';
+        ord.driver_status = null;
+        ord.driver_id = null;
+        await bot.answerCallbackQuery(cb.id, { text: 'No available drivers — order kept in queue' });
+      }
+      saveData();
+      try { return await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: cb.message.chat.id, message_id: cb.message.message_id }); } catch (e) { /* ignore */ }
+    }
+  }
+
+  // start/stop live location sharing by driver
+  if (data.startsWith('driver_start_live:')) {
+    const id = Number(data.split(':')[1]);
+    const drv = drivers.find(d => d.id === from.id);
+    const ord = orders.find(o => o.order_id === id);
+    if (drv && ord) {
+      const s = startLiveSession(drv.id, ord.order_id);
+      await bot.answerCallbackQuery(cb.id, { text: tFor(from.id, 'live_started', drv.name, new Date(s.expiresAt).toLocaleTimeString()) });
+      if (ord.customer_id) await bot.sendMessage(ord.customer_id, tFor(drv.id, 'live_shared', drv.name, new Date(s.expiresAt).toLocaleTimeString()));
+    }
+    return;
+  }
+  if (data.startsWith('driver_stop_live:')) {
+    const id = Number(data.split(':')[1]);
+    const drv = drivers.find(d => d.id === from.id);
+    const ord = orders.find(o => o.order_id === id);
+    if (drv && ord) {
+      stopLiveSession(drv.id, ord.order_id);
+      await bot.answerCallbackQuery(cb.id, { text: tFor(from.id, 'live_stopped', drv.name) });
+      if (ord.customer_id) await bot.sendMessage(ord.customer_id, tFor(drv.id, 'live_stopped', drv.name));
+    }
+    return;
+  }
+
+  // driver approval flows
+  if (data.startsWith('drv_approve:')) {
+    const id = Number(data.split(':')[1]);
+    const drv = drivers.find(d => d.id === id);
+    if (drv) {
+      drv.status = 'offline';
+      await bot.answerCallbackQuery(cb.id, { text: 'Driver approved' });
+      // notify driver and present CONNECT keyboard
+      try { await bot.sendMessage(id, tFor(id, 'reg_approved'), driverOfflineKeyboard); } catch (e) { console.error('Failed notify driver', e.message); }
+      // If there was an admin approval prompt message for this driver, delete it
+      const pending = driverApprovalMessages.get(String(id));
+      if (pending) {
+        try { await bot.deleteMessage(pending.chatId, pending.messageId); } catch (e) { }
+        driverApprovalMessages.delete(String(id));
+      }
+      saveData();
+    }
+  }
+  if (data.startsWith('drv_reject:')) {
+    const id = Number(data.split(':')[1]);
+    const drv = drivers.find(d => d.id === id);
+    if (drv) {
+      drv.status = 'rejected';
+      await bot.answerCallbackQuery(cb.id, { text: 'Driver rejected' });
+      try { await bot.sendMessage(id, 'Registration rejected by admin'); } catch (e) { console.error('Failed notify driver', e.message); }
+      const pending = driverApprovalMessages.get(String(id));
+      if (pending) {
+        try { await bot.deleteMessage(pending.chatId, pending.messageId); } catch (e) { }
+        driverApprovalMessages.delete(String(id));
+      }
+      saveData();
+    }
+  }
+
+  // Admin actions: open order, set payment, mark paid, set total, cancel, back
+  if (data.startsWith('open:')) {
+    const parts = data.split(':');
+    const id = Number(parts[1]);
+    const ord = orders.find(o => o.order_id === id);
+    if (ord) {
+      ord._editingBy = ADMIN_ID;
+      ord._editField = null;
+      await bot.answerCallbackQuery(cb.id, { text: 'Opening order in edit mode' });
+      await sendOrderDetailsToAdmin(id, true, ADMIN_ID);
+    }
+    return;
+  }
+  if (data.startsWith('setpay:')) {
+    const parts = data.split(':');
+    const method = parts[1];
+    const id = Number(parts[2]);
+    const ord = orders.find(o => o.order_id === id);
+    if (ord) {
+      ord.payment_method = method;
+      if (method === 'CASH') {
+        ord.given_cash = null;
+        ord.change_cash = null;
+        ord._editingBy = ADMIN_ID;
+        ord._editField = 'given_cash';
+        await bot.answerCallbackQuery(cb.id, { text: 'Payment method set to CASH — send $amount to set given cash' });
+        await bot.sendMessage(ADMIN_ID, `Send $<amount> to set given cash for order #${String(id).padStart(4,'0')}`);
+      } else {
+        ord._editingBy = null;
+        ord._editField = null;
+        await bot.answerCallbackQuery(cb.id, { text: `Payment method set to ${method}` });
+      }
+  saveData();
+  await sendOrderDetailsToAdmin(id, true, ADMIN_ID);
+    }
+    return;
+  }
+  if (data.startsWith('setpaid:')) {
+    const parts = data.split(':');
+    const id = Number(parts[1]);
+    const ord = orders.find(o => o.order_id === id);
+    if (ord) {
+      ord.paid_status = 'PAID';
+      await bot.answerCallbackQuery(cb.id, { text: tFor(ADMIN_ID, 'marked_paid') || 'Marked as PAID' });
+  saveData();
+  await sendOrderDetailsToAdmin(id, true, ADMIN_ID);
+    }
+    return;
+  }
+  if (data.startsWith('settotal:')) {
+    const parts = data.split(':');
+    const id = Number(parts[1]);
+    const ord = orders.find(o => o.order_id === id);
+    if (ord) {
+      ord._editingBy = ADMIN_ID;
+      ord._editField = 'total_amount';
+      await bot.answerCallbackQuery(cb.id, { text: 'Send $<amount> as a message to set the total' });
+      await bot.sendMessage(ADMIN_ID, `Please send the new total as $<amount> to update order #${String(id).padStart(4,'0')}`);
+    }
+    return;
+  }
+  // admin wants to pick a QR to send for an order
+  if (data.startsWith('sendqr:')) {
+    const id = Number(data.split(':')[1]);
+    const ord = orders.find(o => o.order_id === id);
+  if (!ord) return await bot.answerCallbackQuery(cb.id, { text: tFor(from.id, 'order_not_found') || 'Order not found' });
+  if (!ADMIN_ID) return await bot.answerCallbackQuery(cb.id, { text: tFor(from.id, 'no_admin') || 'No admin set' });
+    const rows = qrCodes.map(q => [{ text: `${q.enabled ? '✅' : '⬜'} ${q.code}`, callback_data: `qr:send:${q.id}:${id}` }]);
+    rows.push([{ text: 'Cancel', callback_data: 'back:menu' }]);
+    await bot.answerCallbackQuery(cb.id, { text: 'Choose QR to send' });
+    return bot.sendMessage(ADMIN_ID, `Send which QR to order #${String(id).padStart(4,'0')}?`, { reply_markup: { inline_keyboard: rows } });
+  }
+
+  // send the chosen QR to the customer and mark order.payment_method=QR
+  if (data.startsWith('qr:send:')) {
+    const parts = data.split(':');
+    const qid = parts[1];
+    const id = Number(parts[2]);
+    const q = qrCodes.find(x => String(x.id) === String(qid));
+    const ord = orders.find(o => o.order_id === id);
+  if (!q || !ord) return await bot.answerCallbackQuery(cb.id, { text: tFor(from.id, 'qr_or_order_not_found') || 'QR or order not found' });
+  if (!ord.customer_id) return await bot.answerCallbackQuery(cb.id, { text: tFor(from.id, 'order_no_customer') || 'Order has no customer' });
+    // send media/text depending on q.media
+    try {
+      if (q.media && q.media.type === 'photo') {
+        await bot.sendPhoto(ord.customer_id, q.media.file_id, { caption: `Use this QR to pay for order #${String(id).padStart(4,'0')}` });
+      } else if (q.media && q.media.type === 'document') {
+        await bot.sendDocument(ord.customer_id, q.media.file_id, {}, { caption: `Use this QR to pay for order #${String(id).padStart(4,'0')}` });
+      } else if (q.media && q.media.type === 'text') {
+        await bot.sendMessage(ord.customer_id, `QR code: ${q.media.text}\nUse this to pay for order #${String(id).padStart(4,'0')}`);
+      } else {
+        await bot.sendMessage(ord.customer_id, `QR code: ${q.code}\nUse this to pay for order #${String(id).padStart(4,'0')}`);
+      }
+      ord.payment_method = 'QR';
+  saveData();
+  await bot.answerCallbackQuery(cb.id, { text: tFor(ADMIN_ID, 'qr_sent') || `QR sent to customer` });
+  await bot.sendMessage(ADMIN_ID, `QR ${q.code} sent to ${ord.customer_name || 'customer'}`);
+    } catch (e) {
+      console.error('Failed send QR to customer', e.message);
+      await bot.answerCallbackQuery(cb.id, { text: 'Failed to send QR' });
+    }
+    return;
+  }
+  if (data.startsWith('cancel:')) {
+    const parts = data.split(':');
+    const id = Number(parts[1]);
+    const ord = orders.find(o => o.order_id === id);
+    if (ord) {
+      ord.order_status = 'cancelled'; ord.order_status_emoji = '❌';
+      ord._editingBy = null; ord._editField = null;
+      await bot.answerCallbackQuery(cb.id, { text: 'Order cancelled' });
+  saveData();
+  await sendOrderDetailsToAdmin(id, false, ADMIN_ID);
+    }
+    return;
+  }
+  if (data.startsWith('back:')) {
+    // simple back to menu
+    await bot.answerCallbackQuery(cb.id, { text: 'Back to menu' });
+  clearAdminTempMessages();
+  await bot.sendMessage(ADMIN_ID, 'Admin menu', adminMainKeyboard);
+    return;
+  }
+    // Driver actions
+    if (data.startsWith('driver_pickup:')) {
+      const id = Number(data.split(':')[1]);
+      const ord = orders.find(o => o.order_id === id);
+      const drv = drivers.find(d => d.id === from.id);
+      if (ord && drv) {
+    ord.order_status = 'pickedup'; ord.order_status_emoji = '⚡'; ord.driver_status = 'busy'; ord.driver_id = drv.id;
+        await bot.answerCallbackQuery(cb.id, { text: 'You picked up the order' });
+        // notify customer
+        if (ord.customer_id) await bot.sendMessage(ord.customer_id, `Your order #${String(id).padStart(4,'0')} has been picked up. Your driver ${drv.name} is on the way.`, { reply_markup: { inline_keyboard: [[{ text: '❔ETA', callback_data: `eta:${id}` }]] } });
+        // send driver active keyboard
+    try { await bot.sendMessage(drv.id, 'Order active', { reply_markup: { inline_keyboard: [[{ text: '🏁 ARRIVED', callback_data: `driver_arrived:${id}` }, { text: '🗺️ LOCATION', callback_data: `driver_location:${id}` }, { text: '⏰ DELAY', callback_data: `driver_delay:${id}` }]] } }); } catch(e){}
+    saveData();
+      }
+      return;
+    }
+    if (data.startsWith('driver_route:')) {
+      const id = Number(data.split(':')[1]);
+      const ord = orders.find(o => o.order_id === id);
+      if (ord) {
+        // compute ETA using driver's active session location and order.map_link if containing coords
+        await bot.answerCallbackQuery(cb.id, { text: 'Route preview' });
+        let distanceText = 'N/A';
+        let etaText = 'N/A';
+        const drv = drivers.find(d => d.id === cb.from.id);
+        const session = getActiveSessionForDriver(cb.from.id);
+        let distance = null;
+        let etaSec = null;
+        if (ord.map_link && ord.map_link.startsWith('location:')) {
+          const parts = ord.map_link.replace('location:', '').replace(/\s+/g,'').split(',');
+          const lat = parseFloat(parts[0]);
+          const lon = parseFloat(parts[1]);
+          let originLat = null, originLon = null;
+          if (session && session.lastLocation) { originLat = session.lastLocation.latitude; originLon = session.lastLocation.longitude; }
+          else if (drv && drv.lastKnown) { originLat = drv.lastKnown.latitude; originLon = drv.lastKnown.longitude; }
+          if (originLat !== null && originLon !== null) {
+            distance = haversineMeters(originLat, originLon, lat, lon);
+            etaSec = estimateETASeconds(distance, 30);
+            distanceText = `${Math.round(distance)} m`;
+            if (etaSec !== null) etaText = `${Math.round(etaSec/60)} min`;
+            // construct a Google Maps directions link for driver convenience
+            const gLink = `https://www.google.com/maps/dir/?api=1&origin=${originLat},${originLon}&destination=${lat},${lon}&travelmode=driving`;
+            try {
+              await bot.sendMessage(cb.from.id, `🛵 Route preview:\nDistance: ${distanceText}\nETA: ${etaText}`, { reply_markup: { inline_keyboard: [[{ text: 'Open in Maps', url: gLink }]] } });
+            } catch (e) {}
+            return;
+          }
+        }
+        try { await bot.sendMessage(cb.from.id, `🛵 Route preview:\nDistance: ${distanceText}\nETA: ${etaText}`); } catch (e) {}
+      }
+      return;
+    }
+    if (data.startsWith('driver_arrived:')) {
+      const id = Number(data.split(':')[1]);
+      const ord = orders.find(o => o.order_id === id);
+      const drv = drivers.find(d => d.id === from.id);
+      if (ord) {
+        ord.order_status = 'arrived'; ord.order_status_emoji = '🏁';
+        await bot.answerCallbackQuery(cb.id, { text: 'Marked as arrived' });
+        if (ord.customer_id) await bot.sendMessage(ord.customer_id, `Hi, here's ${drv ? drv.name : 'your driver'}, I'm just arrived at your place, please come to get your meal`, { reply_markup: { inline_keyboard: [[{ text: 'OK', callback_data: `cust_ok:${id}` }]] } });
+      }
+      return;
+    }
+    if (data.startsWith('driver_location:')) {
+      const id = Number(data.split(':')[1]);
+      const drv = drivers.find(d => d.id === from.id);
+      const ord = orders.find(o => o.order_id === id);
+      if (ord && ord.customer_id) {
+        await bot.answerCallbackQuery(cb.id, { text: 'Please send your live location now (use Telegram location attachment)' });
+        // note: driver will send a location message which is handled by the 'location' event below
+      }
+      return;
+    }
+    if (data.startsWith('driver_delay:')) {
+      const id = Number(data.split(':')[1]);
+      const drv = drivers.find(d => d.id === from.id);
+      if (drv) {
+        await bot.answerCallbackQuery(cb.id, { text: 'Select delay' });
+        try { await bot.sendMessage(drv.id, 'Select delay: 2mn, 5mn, +10mn', { reply_markup: { inline_keyboard: [[{ text: '2mn', callback_data: `delay:2:${id}` }, { text: '5mn', callback_data: `delay:5:${id}` }, { text: '+10mn', callback_data: `delay:10:${id}` }]] } }); } catch(e){}
+      }
+      return;
+    }
+    if (data.startsWith('delay:')) {
+      const parts = data.split(':');
+      const mins = parts[1];
+      const id = Number(parts[2]);
+      const ord = orders.find(o => o.order_id === id);
+      const drv = drivers.find(d => d.id === from.id);
+      if (ord && drv) {
+        if (ord.customer_id) await bot.sendMessage(ord.customer_id, `Hi, here's ${drv.name}, I am ${mins} minutes away.`);
+        await bot.answerCallbackQuery(cb.id, { text: `Delay message sent (${mins}mn)` });
+      }
+      return;
+    }
+    // navigation in completed list
+    if (data.startsWith('nav:')) {
+      const parts = data.split(':');
+      const dir = parts[1];
+      const id = Number(parts[2]);
+      const completed = ordersBySection('COMPLETED');
+      const idx = completed.findIndex(o => o.order_id === id);
+      if (idx === -1) return await bot.answerCallbackQuery(cb.id, { text: 'Not found in completed list' });
+      let nextIdx = idx;
+      if (dir === 'prev') nextIdx = Math.max(0, idx - 1);
+      if (dir === 'next') nextIdx = Math.min(completed.length - 1, idx + 1);
+      const nextOrder = completed[nextIdx];
+      if (nextOrder) {
+        await bot.answerCallbackQuery(cb.id, { text: 'Opening order' });
+        await sendOrderDetailsToAdmin(nextOrder.order_id, false, ADMIN_ID);
+      }
+      return;
+    }
+
+    // admin settings and QR management
+    if (data === 'settings:open') {
+      await bot.answerCallbackQuery(cb.id, { text: 'Settings' });
+      const kb = { reply_markup: { inline_keyboard: [[{ text: 'Manage QR Codes', callback_data: 'settings:qr' }, { text: 'Back', callback_data: 'back:menu' }]] } };
+      return bot.sendMessage(ADMIN_ID, 'Settings', kb);
+    }
+      if (data === 'settings:rotate') {
+        await bot.answerCallbackQuery(cb.id, { text: 'Rotation size' });
+        const rows = [
+          [{ text: '1 MB', callback_data: 'settings:set:groupLogRotateBytes:1048576' }, { text: '5 MB', callback_data: 'settings:set:groupLogRotateBytes:5242880' }],
+          [{ text: '10 MB', callback_data: 'settings:set:groupLogRotateBytes:10485760' }, { text: 'Cancel', callback_data: 'back:menu' }]
+        ];
+        return bot.sendMessage(ADMIN_ID, `Current rotate: ${SETTINGS.groupLogRotateBytes} bytes`, { reply_markup: { inline_keyboard: rows } });
+      }
+      if (data === 'settings:ttl') {
+        await bot.answerCallbackQuery(cb.id, { text: 'Admin TTL' });
+        const rows = [
+          [{ text: '30s', callback_data: 'settings:set:adminTempTTL:30000' }, { text: '60s', callback_data: 'settings:set:adminTempTTL:60000' }],
+          [{ text: '120s', callback_data: 'settings:set:adminTempTTL:120000' }, { text: '300s', callback_data: 'settings:set:adminTempTTL:300000' }]
+        ];
+        return bot.sendMessage(ADMIN_ID, `Current TTL: ${SETTINGS.adminTempTTL} ms`, { reply_markup: { inline_keyboard: rows } });
+      }
+      if (data === 'settings:archive') {
+        await bot.answerCallbackQuery(cb.id, { text: 'Archive days' });
+        const rows = [
+          [{ text: '7d', callback_data: 'settings:set:archiveDays:7' }, { text: '14d', callback_data: 'settings:set:archiveDays:14' }],
+          [{ text: '30d', callback_data: 'settings:set:archiveDays:30' }, { text: 'Cancel', callback_data: 'back:menu' }]
+        ];
+        return bot.sendMessage(ADMIN_ID, `Current archive days: ${SETTINGS.archiveDays}`, { reply_markup: { inline_keyboard: rows } });
+      }
+      if (data.startsWith('settings:set:')) {
+        const parts = data.split(':');
+        const key = parts[2];
+        const val = Number(parts[3]);
+        if (key && !isNaN(val)) {
+          SETTINGS[key] = val;
+          saveData();
+          await bot.answerCallbackQuery(cb.id, { text: `Set ${key} = ${val}` });
+          return bot.sendMessage(ADMIN_ID, `Updated ${key} to ${val}`);
+        }
+      }
+    if (data === 'settings:qr') {
+      await bot.answerCallbackQuery(cb.id, { text: 'QR management' });
+      const rows = qrCodes.map(q => [{ text: `${q.enabled ? '✅' : '⬜'} ${q.code}`, callback_data: `qr:toggle:${q.id}` }, { text: '⚙️', callback_data: `qr:opts:${q.id}` }]);
+      rows.push([{ text: '➕ Add QR', callback_data: 'qr:add' }, { text: '⬅️ Back', callback_data: 'back:menu' }]);
+      return bot.sendMessage(ADMIN_ID, 'QR Codes', { reply_markup: { inline_keyboard: rows } });
+    }
+    if (data.startsWith('qr:opts:')) {
+      const id = data.split(':')[2] || data.split(':')[1];
+      const q = qrCodes.find(x => String(x.id) === String(id));
+      if (!q) return await bot.answerCallbackQuery(cb.id, { text: 'QR not found' });
+      const kb = { reply_markup: { inline_keyboard: [[{ text: '🔍 Preview', callback_data: `qr:preview:${q.id}` }, { text: '🗑️ Delete', callback_data: `qr:del:${q.id}` }], [{ text: '⬅️ Back', callback_data: 'settings:qr' }]] } };
+      await bot.answerCallbackQuery(cb.id, { text: 'QR options' });
+      return bot.sendMessage(ADMIN_ID, `Options for ${q.code}`, kb);
+    }
+    if (data.startsWith('qr:preview:')) {
+      const id = data.split(':')[2] || data.split(':')[1];
+      const q = qrCodes.find(x => String(x.id) === String(id));
+      if (!q) return await bot.answerCallbackQuery(cb.id, { text: 'QR not found' });
+      await bot.answerCallbackQuery(cb.id, { text: 'Previewing QR' });
+      try {
+        if (q.media && q.media.type === 'photo') {
+          return await bot.sendPhoto(ADMIN_ID, q.media.file_id, { caption: `Preview ${q.code}` });
+        }
+        if (q.media && q.media.type === 'document') {
+          return await bot.sendDocument(ADMIN_ID, q.media.file_id, {}, { caption: `Preview ${q.code}` });
+        }
+        if (q.media && q.media.type === 'text') {
+          return await bot.sendMessage(ADMIN_ID, `QR text for ${q.code}:\n${q.media.text}`);
+        }
+        return await bot.sendMessage(ADMIN_ID, `QR code: ${q.code}`);
+      } catch (e) { return await bot.sendMessage(ADMIN_ID, `Failed to preview: ${e.message}`); }
+    }
+    if (data.startsWith('qr:del:')) {
+      const id = data.split(':')[2] || data.split(':')[1];
+      const idx = qrCodes.findIndex(x => String(x.id) === String(id));
+      if (idx === -1) return await bot.answerCallbackQuery(cb.id, { text: 'QR not found' });
+      const removed = qrCodes.splice(idx, 1)[0];
+      saveData();
+      await bot.answerCallbackQuery(cb.id, { text: `Deleted ${removed.code}` });
+      return bot.sendMessage(ADMIN_ID, `Deleted QR ${removed.code}`);
+    }
+    if (data.startsWith('qr:toggle:')) {
+      const id = data.split(':')[2];
+      const q = qrCodes.find(x => String(x.id) === String(id));
+      if (q) { q.enabled = !q.enabled; saveData(); await bot.answerCallbackQuery(cb.id, { text: `QR ${q.code} set ${q.enabled ? 'enabled' : 'disabled'}` }); }
+      return;
+    }
+    if (data === 'qr:add') {
+  // mark admin as pending to upload a QR (next media/text will attach)
+  const newQ = { id: `${Date.now()}`, code: `QR-${Date.now()}`, enabled: true, createdAt: Date.now(), media: null };
+  qrCodes.push(newQ); saveData();
+  adminPendingQR.set(ADMIN_ID, newQ.id);
+  await bot.answerCallbackQuery(cb.id, { text: 'Send the QR image or code text now (as a photo or message).' });
+  return await bot.sendMessage(ADMIN_ID, `Please send the QR image or code text for ${newQ.code}.`);
+    }
+    // feedback handling
+    if (data.startsWith('fb:')) {
+      const parts = data.split(':');
+      const note = Number(parts[1]);
+      const id = Number(parts[2]);
+      const ord = orders.find(o => o.order_id === id);
+      if (ord) {
+        ord.feedback = note;
+        await bot.answerCallbackQuery(cb.id, { text: `Thanks for your ${note}⭐` });
+        saveData();
+        if (ord.driver_name) {
+          const drv = drivers.find(d => d.name === ord.driver_name);
+          if (drv) {
+            try { await bot.sendMessage(drv.id, `${ord.customer_name || 'Customer'} gave you ${note}⭐`); } catch (e) { /* ignore */ }
+          }
+        }
+        await notifyAdmin(`Feedback: ${note} for order #${String(id).padStart(4,'0')}`);
+      }
+      return;
+    }
+    // archive approvals from group prompt
+    if (data.startsWith('archive_approve:')) {
+      const parts = data.split(':');
+      const id = Number(parts[1]) || 0;
+      await bot.answerCallbackQuery(cb.id, { text: 'Archive approved' });
+      // delete the prompt message in the group (cb.message)
+      try { await bot.deleteMessage(cb.message.chat.id, cb.message.message_id); } catch (e) {}
+      if (id && id > 0) {
+        const ord = orders.find(o => o.order_id === id);
+        if (ord) { ord.order_status = 'archived'; saveData(); await bot.sendMessage(ADMIN_ID, `Order #${String(id).padStart(4,'0')} archived.`); }
+      } else {
+        // archive orders older than 7 days
+        const cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000);
+        let n = 0;
+        orders.forEach(o => { if (new Date(o.date_time_stamp).getTime() < cutoff && o.order_status !== 'archived') { o.order_status = 'archived'; n++; } });
+        saveData();
+        await bot.sendMessage(ADMIN_ID, `Archived ${n} orders older than 7 days.`);
+      }
+      return;
+    }
+    if (data.startsWith('archive_reject:')) {
+      await bot.answerCallbackQuery(cb.id, { text: 'Archive rejected' });
+      try { await bot.deleteMessage(cb.message.chat.id, cb.message.message_id); } catch (e) {}
+      await bot.sendMessage(ADMIN_ID, 'Archive rejected by group');
+      return;
+    }
+});
+
+// Simple lifecycle commands for driver to connect/disconnect/pickup/arrive/complete
+bot.onText(/\/connect/, async (msg) => {
+  const drv = drivers.find(d => d.id === msg.from.id);
+  if (!drv) return bot.sendMessage(msg.chat.id, 'You are not registered. Use /register');
+  drv.status = 'online';
+  // present online keyboard
+  try { await bot.sendMessage(msg.chat.id, tFor(msg.from.id, 'now_online'), driverOnlineKeyboard); } catch (e) { }
+  // notify admin briefly
+  await notifyAdmin(`Driver ${drv.name || drv.id} connected`);
+  saveData();
+});
+
+bot.onText(/\/disconnect/, async (msg) => {
+  const drv = drivers.find(d => d.id === msg.from.id);
+  if (!drv) return bot.sendMessage(msg.chat.id, 'You are not registered. Use /register');
+  drv.status = 'offline';
+  try { await bot.sendMessage(msg.chat.id, tFor(msg.from.id, 'now_offline'), driverOfflineKeyboard); } catch (e) { }
+  await notifyAdmin(`Driver ${drv.name || drv.id} disconnected`);
+  saveData();
+});
+
+// Pickup/arrived/completed for driver using simple text commands for now
+bot.onText(/\/pickup (\d+)/, async (msg, match) => {
+  const id = Number(match[1]);
+  const ord = orders.find(o => o.order_id === id);
+  if (!ord) return bot.sendMessage(msg.chat.id, 'Order not found');
+  ord.order_status = 'pickedup'; ord.order_status_emoji = '⚡'; ord.driver_status = 'busy';
+  await bot.sendMessage(msg.chat.id, `Picked up order #${String(id).padStart(4,'0')}`);
+  // notify customer if available
+  if (ord.customer_id) await bot.sendMessage(ord.customer_id, `Your order #${String(id).padStart(4,'0')} has been picked up. 🚀`);
+  saveData();
+});
+
+bot.onText(/\/arrived (\d+)/, async (msg, match) => {
+  const id = Number(match[1]);
+  const ord = orders.find(o => o.order_id === id);
+  if (!ord) return bot.sendMessage(msg.chat.id, 'Order not found');
+  ord.order_status = 'arrived'; ord.order_status_emoji = '🏁';
+  await bot.sendMessage(msg.chat.id, `Marked order #${String(id).padStart(4,'0')} as arrived`);
+  if (ord.customer_id) await bot.sendMessage(ord.customer_id, `Hi, here's the driver for order #${String(id).padStart(4,'0')}. Please collect your order.`);
+  saveData();
+});
+
+bot.onText(/\/complete (\d+)/, async (msg, match) => {
+  const id = Number(match[1]);
+  const ord = orders.find(o => o.order_id === id);
+  if (!ord) return bot.sendMessage(msg.chat.id, 'Order not found');
+  ord.order_status = 'completed'; ord.order_status_emoji = '✅'; ord.driver_status = 'online';
+  await bot.sendMessage(msg.chat.id, `Completed order #${String(id).padStart(4,'0')}`);
+  if (ord.customer_id) {
+    await bot.sendMessage(ord.customer_id, `Thank you for ordering! Please rate your delivery experience.`, { reply_markup: { inline_keyboard: [[{ text: '1', callback_data: `fb:1:${id}` }, { text: '2', callback_data: `fb:2:${id}` }, { text: '3', callback_data: `fb:3:${id}` }, { text: '4', callback_data: `fb:4:${id}` }, { text: '5', callback_data: `fb:5:${id}` }]] } });
+  }
+  saveData();
+});
+
+// Delete any webhook that may be set (prevents 409 when switching from webhook to polling)
+bot.deleteWebHook().then(() => {
+  console.log('Webhook cleared (if any). Starting long polling...');
+  try { bot.startPolling(); console.log('Bot started. Waiting for updates...'); } catch (e) { console.error('Failed to start polling', e && e.message); }
+}).catch(err => {
+  console.error('Failed to delete webhook (continuing):', err && err.message);
+  try { bot.startPolling(); console.log('Bot started. Waiting for updates...'); } catch (e) { console.error('Failed to start polling', e && e.message); }
+});
+
+// Diagnostic: print current webhook info for the bot (helps debug 409 errors)
+setTimeout(async () => {
+  try {
+    const info = await bot.getWebHookInfo ? bot.getWebHookInfo() : null;
+    if (info && typeof info.then === 'function') {
+      info.then(i => console.log('getWebHookInfo:', JSON.stringify(i, null, 2))).catch(e => console.error('getWebHookInfo failed', e && e.message));
+    } else {
+      console.log('getWebHookInfo: not available');
+    }
+  } catch (e) {
+    console.error('getWebHookInfo error', e && e.message);
+  }
+}, 500);
